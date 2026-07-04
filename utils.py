@@ -271,7 +271,45 @@ def support_iou(mask_a, mask_b):
     return (inter / union).item()
 
 
-def evaluate_all(rho, gt, amp_orig, phase_orig, support_gt, hm_sigma=1.0):
+def register_to_gt(rho, gt):
+    """在傅里叶振幅等价的平凡歧义群上把 rho 配准到 gt。
+
+    相位恢复的平凡歧义——整体平移、共轭反转(twin image)、全局相位因子(实信号即 ±符号)，
+    三者傅里叶振幅谱完全相同（Fannjiang 2020；Guizar-Sicairos & Fienup 2012；见调研报告 §5.1）。
+    评估前必须在此歧义群上对齐，否则 Δφ/amp_cc 等被平移污染（Δφ→π/2、amp_cc→0）。
+
+    做法：对 4 个变体（±符号 × 正/共轭反转）各做一次 FFT 互相关（Kuglin & Hines 1975）
+    定位最佳整数平移，再就平移正负两种 roll 取与 gt 归一化内积最大者，规避 FFT/roll
+    符号约定歧义。返回对齐后的 rho（不修改 gt）。
+    """
+    G = torch.fft.fft2(gt)
+    _, _, H, W = rho.shape
+    g_norm = gt.norm() + 1e-12
+    best_score = -2.0
+    best_aligned = rho
+    for sign in (1.0, -1.0):
+        for flip in (False, True):
+            var = sign * rho
+            if flip:
+                var = torch.flip(var, dims=(-2, -1))
+            V = torch.fft.fft2(var)
+            cc = torch.fft.ifft2(G.conj() * V).real            # 互相关，峰值位置=位移
+            dy, dx = divmod(cc.argmax().item(), W)
+            if dy > H // 2:
+                dy -= H                                        # 折到 [-H/2, H/2)
+            if dx > W // 2:
+                dx -= W
+            var_norm = var.norm() + 1e-12
+            for sy, sx in ((dy, dx), (-dy, -dx)):              # 两种 roll 方向取优
+                aligned = torch.roll(var, shifts=(sy, sx), dims=(-2, -1))
+                score = ((aligned * gt).sum() / (g_norm * var_norm)).item()
+                if score > best_score:
+                    best_score = score
+                    best_aligned = aligned
+    return best_aligned
+
+
+def evaluate_all(rho, gt, amp_orig, phase_orig, support_gt, hm_sigma=1.0, align_to_gt=False):
     """
     一次性计算全部指标。返回 dict。
     评估前先把 rho 投影到可行域（正值 + support 内），消除 HIO support 外反馈值的影响；
@@ -282,6 +320,8 @@ def evaluate_all(rho, gt, amp_orig, phase_orig, support_gt, hm_sigma=1.0):
       phase_orig: 原始相位
       support_gt: 真值支撑域
     """
+    if align_to_gt:
+        rho = register_to_gt(rho, gt)                  # 平凡歧义群配准（调研报告 §5.2）
     support_pred = shrinkwrap_support(rho, hm_sigma)
     rho_eval = rho.clamp_min(0) * support_pred  # 投影到可行域
     amp_calc, phase_calc = fft_amp_phase(rho_eval)

@@ -25,7 +25,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # 避免 Windows GBK 编码报错
 
 from utils import (load_and_preprocess, fft_amp_phase, make_random_phase, init_density,
-                   shrinkwrap_support, estimate_reference_histogram, unpad)
+                   shrinkwrap_support, estimate_reference_histogram, unpad, register_to_gt)
 from hio import run_hio
 from unet_pr import run_unet
 
@@ -35,8 +35,8 @@ plt.rcParams['axes.unicode_minus'] = False
 
 # ===================== 超参（默认长测试；可被命令行覆盖）=====================
 SIGMA0 = 3.0
-HIO_ITER = 30000      # 甲方轮次（HIO 每轮快，给足轮次才与 UNet 算力相当）
-UNET_ITER = 5000      # 乙方轮次（实验2/3 同）
+HIO_ITER = 10000      # 甲方轮次（实测 ~0.10 s/轮，与 UNet 3000 轮 wall-clock 相当）
+UNET_ITER = 3000      # 乙方轮次（实验2/3 同，~0.34 s/轮）
 UNET_LR = 1e-4
 PHASE_SEED = 42
 UNET_SEED = 0
@@ -100,16 +100,20 @@ def plot_support(support_gt, support_res, title, pad_info, save_path):
     print(f"  已保存 support.png")
 
 
-def plot_convergence_single(hist, title, save_path):
-    """单实验 5 指标收敛曲线（2×3，末格空）。"""
+def plot_convergence_single(hist, title, save_path, monitor_key=None, monitor_label=None):
+    """单实验收敛曲线（2×3）：首格为 monitor(loss/amp_residual)，余 5 格为评估指标。"""
     metrics = ['psnr', 'ssim', 'amp_cc', 'phase_err', 'support_iou']
     titles = ['PSNR (dB)', 'SSIM', '振幅域 CC', '平均相位误差 (rad)', '支撑域 IoU']
+    if monitor_key:
+        metrics = [monitor_key] + metrics
+        titles = [monitor_label or monitor_key] + titles
     fig, axes = plt.subplots(2, 3, figsize=(15, 8))
     axes = axes.flatten()
     for ax, k, t in zip(axes, metrics, titles):
         ax.plot(hist['iter'], hist[k], color='#2E86AB', lw=2)
         ax.set_xlabel('迭代轮数'); ax.set_ylabel(t); ax.set_title(t); ax.grid(True, alpha=0.3)
-    axes[5].axis('off')
+    if len(metrics) < 6:
+        axes[5].axis('off')
     fig.suptitle(f'{title} 收敛曲线', fontsize=16)
     plt.tight_layout(); plt.savefig(save_path, dpi=150, bbox_inches='tight'); plt.close()
     print(f"  已保存 convergence.png")
@@ -126,18 +130,38 @@ def save_metrics_single(hist, save_path):
     print(f"  已保存 metrics.csv")
 
 
-def dump_experiment(folder, label, best, hist, gt_vis, rho_work, bg_val, pad_info, support_gt, run_dir):
-    """单个实验出全套图 + 指标表。"""
+def save_history_csv(hist, monitor_key, save_path):
+    """全程 history 存 csv（每次 eval 一行）：iter, monitor(loss/amp_residual), 6 指标。"""
+    metric_keys = ['psnr', 'ssim', 'pearson_cc', 'amp_cc', 'phase_err', 'support_iou']
+    cols = ['iter', monitor_key] + metric_keys
+    rows = [cols]
+    for i in range(len(hist['iter'])):
+        rows.append([hist['iter'][i], hist[monitor_key][i]] + [hist[k][i] for k in metric_keys])
+    with open(save_path, 'w', newline='', encoding='utf-8-sig') as f:
+        csv.writer(f).writerows(rows)
+    print(f"  已保存 history.csv")
+
+
+def dump_experiment(folder, label, best, hist, gt_vis, rho_work, bg_val, pad_info, support_gt, run_dir,
+                    monitor_key=None, monitor_label=None):
+    """单个实验出全套图 + 指标表（best 先配准再出图，消除平移歧义）。"""
     exp_dir = os.path.join(run_dir, folder)
     os.makedirs(exp_dir, exist_ok=True)
     print(f"\n--- {label} 出图 ---")
-    res_vis = to_visual(best, bg_val, pad_info)
-    support_res = shrinkwrap_support(best, 1.0)
+    best_aligned = register_to_gt(best, rho_work)            # 出图前配准，消除平移歧义
+    res_vis = to_visual(best_aligned, bg_val, pad_info)
+    support_res = shrinkwrap_support(best_aligned, 1.0)
     plot_real_space(gt_vis, res_vis, label, os.path.join(exp_dir, 'real_space.png'))
-    plot_spectra(rho_work, best, label, os.path.join(exp_dir, 'spectra.png'))
+    plot_spectra(rho_work, best_aligned, label, os.path.join(exp_dir, 'spectra.png'))
     plot_support(support_gt, support_res, label, pad_info, os.path.join(exp_dir, 'support.png'))
-    plot_convergence_single(hist, label, os.path.join(exp_dir, 'convergence.png'))
+    plot_convergence_single(hist, label, os.path.join(exp_dir, 'convergence.png'),
+                            monitor_key, monitor_label)
     save_metrics_single(hist, os.path.join(exp_dir, 'metrics.csv'))
+    if monitor_key:
+        save_history_csv(hist, monitor_key, os.path.join(exp_dir, 'history.csv'))
+    torch.save({'best_rho': best_aligned, 'best_rho_raw': best, 'hist': hist},
+               os.path.join(exp_dir, 'state.pt'))
+    print(f"  已保存 state.pt（best_rho + history）")
 
 
 # ===================== 三实验横向对比 =====================
@@ -213,15 +237,16 @@ def main():
 
     # 各实验出图
     experiments = [
-        ('exp1_hio', '传统 HIO', best1, hist1),
-        ('exp2_unet_sigmoid', 'UNet+sigmoid+置0', best2, hist2),
-        ('exp3_unet_tanh', 'UNet+tanh+HIO', best3, hist3),
+        ('exp1_hio', '传统 HIO', best1, hist1, 'amp_residual', '振幅残差'),
+        ('exp2_unet_sigmoid', 'UNet+sigmoid+置0', best2, hist2, 'loss', 'UNet loss'),
+        ('exp3_unet_tanh', 'UNet+tanh+HIO', best3, hist3, 'loss', 'UNet loss'),
     ]
-    for folder, label, best, hist in experiments:
-        dump_experiment(folder, label, best, hist, gt_vis, rho_work, bg_val, pad_info, support_gt, run_dir)
+    for folder, label, best, hist, mon_key, mon_label in experiments:
+        dump_experiment(folder, label, best, hist, gt_vis, rho_work, bg_val, pad_info, support_gt, run_dir,
+                        monitor_key=mon_key, monitor_label=mon_label)
 
     # 三实验横向对比
-    metrics_list = [(label, best_point(hist)) for _, label, _, hist in experiments]
+    metrics_list = [(label, best_point(hist)) for _, label, _, hist, _, _ in experiments]
     plot_comparison(metrics_list, os.path.join(run_dir, 'comparison.png'))
     save_comparison_table(metrics_list, os.path.join(run_dir, 'comparison.csv'))
 

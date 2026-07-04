@@ -110,7 +110,7 @@ def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
              max_iter=5000, lr=1e-4, beta=0.7,
              out_act='tanh', use_hio_feedback=True,
              sigma0=3.0, sigma_end=1.0, sigma_interval=20, sigma_total=500,
-             eval_every=20, unet_seed=0):
+             eval_every=20, unet_seed=0, align_eval=True):
     """
     未训练 UNet（DIP）迭代。
       amp_orig:         原始振幅（去直流）[1,1,H,W]
@@ -136,7 +136,7 @@ def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
     support = shrinkwrap_support(rho_init, sigma0)
 
     metric_keys = ["psnr", "ssim", "pearson_cc", "amp_cc", "phase_err", "support_iou"]
-    history = {"iter": []}
+    history = {"iter": [], "loss": []}
     for k in metric_keys:
         history[k] = []
     best_score = -1.0
@@ -169,8 +169,9 @@ def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
                 support = shrinkwrap_support(rho_next, sigma)
 
             if it % eval_every == 0:
-                m = evaluate_all(rho_next, gt, amp_orig, phase_orig, support_gt)
+                m = evaluate_all(rho_next, gt, amp_orig, phase_orig, support_gt, align_to_gt=align_eval)
                 history["iter"].append(it)
+                history["loss"].append(loss.item())
                 for k in metric_keys:
                     history[k].append(m[k])
                 score = m["ssim"] + m["amp_cc"]

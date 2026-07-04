@@ -21,7 +21,7 @@ def run_hio(amp_orig, rho_init, ref_edges, gt, support_gt,
             max_iter=3000, beta=0.7,
             sigma0=3.0, sigma_end=1.0, sigma_interval=20, sigma_total=200,
             eval_every=20, do_hm=True, hm_start=0,
-            fixed_support=None, init_support=None, warmup=0):
+            fixed_support=None, init_support=None, warmup=0, align_eval=True):
     """
     严格 HIO 迭代。
       amp_orig:       原始振幅 [1,1,H,W]
@@ -47,7 +47,7 @@ def run_hio(amp_orig, rho_init, ref_edges, gt, support_gt,
         support = shrinkwrap_support(rho_k, sigma0)
 
     metric_keys = ["psnr", "ssim", "pearson_cc", "amp_cc", "phase_err", "support_iou"]
-    history = {"iter": []}
+    history = {"iter": [], "amp_residual": []}
     for k in metric_keys:
         history[k] = []
     best_score = -1.0
@@ -74,8 +74,10 @@ def run_hio(amp_orig, rho_init, ref_edges, gt, support_gt,
 
         # === 评估 ===
         if it % eval_every == 0:
-            m = evaluate_all(rho_next, gt, amp_orig, phase_orig, support_gt)
+            m = evaluate_all(rho_next, gt, amp_orig, phase_orig, support_gt, align_to_gt=align_eval)
+            amp_res = ((fft_amp_phase(rho_next)[0] - amp_orig).norm() / (amp_orig.norm() + 1e-12)).item()
             history["iter"].append(it)
+            history["amp_residual"].append(amp_res)
             for k in metric_keys:
                 history[k].append(m[k])
             score = m["ssim"] + m["amp_cc"]
