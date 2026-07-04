@@ -1,9 +1,9 @@
 """
 unet_pr.py —— 乙方：未训练 UNet 相位恢复（Deep Image Prior 路线）
 
-像空间：UNet 输出做 FFT 取振幅，与 |A_orig| 算 MSE，反传更新网络（软学习，对照甲方硬替换）。
-实空间：HIO 反馈公式（support 内保留 ρ̃ / support 外 ρ_k−β·ρ̃）+ 直方图匹配 + shrinkwrap，
-        与甲方逐字对齐（控制变量；二测修复：补齐此前缺失的 HIO 反馈项）。
+像空间：UNet 输出（tanh）乘 support 后做 FFT 取振幅，与 |A_orig| 算 MSE，反传更新网络（软学习，对照甲方硬替换）。
+实空间：HIO 反馈公式（support 内 ρ̃≥0 保留 / support 外 ρ_k−β·ρ̃）+ 直方图匹配 + shrinkwrap，
+        与甲方逐字对齐（控制变量；输出层 tanh 有界且可负，正值约束由 HIO 反馈 keep 条件实现）。
 """
 
 import time
@@ -63,15 +63,15 @@ class Up(nn.Module):
 
 
 class OutConv(nn.Module):
-    """1x1 卷积 + Sigmoid，输出约束到 [0,1]。"""
+    """1x1 卷积 + Tanh，输出有界 [-1,1] 且可负（扮演甲方 ρ′，正值约束由 HIO 反馈 keep 条件实现）。"""
 
     def __init__(self, in_ch, out_ch):
         super().__init__()
         self.conv = nn.Conv2d(in_ch, out_ch, 1)
-        self.sigmoid = nn.Sigmoid()
+        self.act = nn.Tanh()
 
     def forward(self, x):
-        return self.sigmoid(self.conv(x))
+        return self.act(self.conv(x))
 
 
 class UNet(nn.Module):
@@ -144,8 +144,9 @@ def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
         optimizer.zero_grad()
 
         # === 像空间（乙方唯一变量）：UNet 前向 → 振幅 MSE 反传（对照甲方硬替换）===
-        raw = model(current_input)                              # ρ̃，sigmoid [0,1]，天然非负
-        amp_pred = fft_amp_phase(raw)[0] / amp_max              # 全局振幅（不预先 ×support，对齐甲方全局替换）
+        raw = model(current_input)                              # ρ̃，tanh 输出 [-1,1]（可负），扮演甲方 ρ′
+        rho_c = raw * support                                   # 候选密度，support 外置 0（最终输出与评估均用它）
+        amp_pred = fft_amp_phase(rho_c)[0] / amp_max            # 振幅 loss 作用在 raw×support
         loss = mse(amp_pred, amp_orig_norm)
         loss.backward()
         optimizer.step()
