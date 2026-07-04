@@ -21,7 +21,7 @@ def run_hio(amp_orig, rho_init, ref_edges, gt, support_gt,
             max_iter=3000, beta=0.7,
             sigma0=3.0, sigma_end=1.0, sigma_interval=20, sigma_total=200,
             eval_every=20, do_hm=True, hm_start=0,
-            fixed_support=None, init_support=None, warmup=0, align_eval=True):
+            fixed_support=None, init_support=None, warmup=0, align_eval=True, gamma=0.9):
     """
     严格 HIO 迭代。
       amp_orig:       原始振幅 [1,1,H,W]
@@ -50,9 +50,6 @@ def run_hio(amp_orig, rho_init, ref_edges, gt, support_gt,
     history = {"iter": [], "amp_residual": []}
     for k in metric_keys:
         history[k] = []
-    best_score = -1.0
-    best_rho = rho_k.clone()
-
     start = time.time()
     for it in range(max_iter):
         # === 像空间：FFT → 振幅硬替换 → IFFT ===
@@ -64,9 +61,9 @@ def run_hio(amp_orig, rho_init, ref_edges, gt, support_gt,
             sigma = sigma_schedule(it - warmup, sigma0, sigma_end, sigma_total)
             support = shrinkwrap_support(rho_k, sigma)
 
-        # === 实空间：严格 HIO 公式 ===
+        # === 实空间：relaxed HIO（support 外 γ·ρ_k − β·ρ′，γ<1 防累加发散）===
         keep = (support > 0.5) & (rho_prime >= 0)
-        rho_next = torch.where(keep, rho_prime, rho_k - beta * rho_prime)
+        rho_next = torch.where(keep, rho_prime, gamma * rho_k - beta * rho_prime)
 
         # === 实空间：直方图匹配（只在 support 内，hm_start 后开启）===
         if do_hm and it >= hm_start:
@@ -80,10 +77,6 @@ def run_hio(amp_orig, rho_init, ref_edges, gt, support_gt,
             history["amp_residual"].append(amp_res)
             for k in metric_keys:
                 history[k].append(m[k])
-            score = m["ssim"] + m["amp_cc"]
-            if score > best_score:
-                best_score = score
-                best_rho = rho_next.clone()
             elapsed = time.time() - start
             print(f"[HIO] {it}/{max_iter} | psnr {m['psnr']:.2f} | ssim {m['ssim']:.3f} | "
                   f"amp_cc {m['amp_cc']:.3f} | Δφ {m['phase_err']:.3f} | iou {m['support_iou']:.3f} | "
@@ -91,4 +84,4 @@ def run_hio(amp_orig, rho_init, ref_edges, gt, support_gt,
 
         rho_k = rho_next
 
-    return best_rho, history
+    return rho_k, history               # 取末轮（收敛态），不取最优瞬间

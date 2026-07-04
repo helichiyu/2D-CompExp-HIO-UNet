@@ -1,5 +1,5 @@
 """
-main.py —— 三测：传统 HIO + UNet(sigmoid+置0) + UNet(tanh+HIO反馈) 对比
+main.py —— 四测：传统 HIO + UNet(sigmoid+置0) + UNet(tanh+HIO反馈) 对比
 
 运行：
   D:\\anaconda3\\envs\\use\\python.exe main.py [HIO_ITER] [UNET_ITER]
@@ -35,11 +35,12 @@ plt.rcParams['axes.unicode_minus'] = False
 
 # ===================== 超参（默认长测试；可被命令行覆盖）=====================
 SIGMA0 = 3.0
-HIO_ITER = 10000      # 甲方轮次（实测 ~0.10 s/轮，与 UNet 3000 轮 wall-clock 相当）
-UNET_ITER = 3000      # 乙方轮次（实验2/3 同，~0.34 s/轮）
+HIO_ITER = 2000      # 甲方轮次（实测 ~0.10 s/轮）
+UNET_ITER = 600      # 乙方轮次（实验2/3 同，~0.34 s/轮）
 UNET_LR = 1e-4
 PHASE_SEED = 42
 UNET_SEED = 0
+GAMMA = 0.9        # relaxed HIO 松弛系数（support 外 γ·ρ − β·ρ′，γ<1 防累加发散；实验1/3 一致）
 
 
 def make_run_dir():
@@ -56,11 +57,9 @@ def to_visual(rho, bg_val, pad_info):
 
 
 def best_point(hist):
-    """取综合分数（SSIM+振幅CC）最大点的各项指标。"""
+    """取末轮（收敛态）的各项指标——不取最优瞬间，最优瞬间未必稳定真实。"""
     keys = ['psnr', 'ssim', 'pearson_cc', 'amp_cc', 'phase_err', 'support_iou']
-    scores = [s + a for s, a in zip(hist['ssim'], hist['amp_cc'])]
-    idx = int(np.argmax(scores))
-    return {k: hist[k][idx] for k in keys}
+    return {k: hist[k][-1] for k in keys}
 
 
 # ===================== 单实验可视化 =====================
@@ -221,19 +220,19 @@ def main():
     # 实验1：传统 HIO（eval_every=100：轮次多，评估间隔放大）
     print("\n" + "=" * 60); print("实验1：传统 HIO"); print("=" * 60)
     best1, hist1 = run_hio(amp_orig, rho_init, ref_edges, rho_work, support_gt,
-                           max_iter=HIO_ITER, beta=0.7, sigma0=SIGMA0, eval_every=100)
+                           max_iter=HIO_ITER, beta=0.7, sigma0=SIGMA0, eval_every=100, gamma=GAMMA)
 
     # 实验2：UNet + sigmoid + 置0（无 HIO 反馈）
     print("\n" + "=" * 60); print("实验2：UNet + sigmoid + 置0（无 HIO 反馈）"); print("=" * 60)
     best2, hist2 = run_unet(amp_orig, rho_init, ref_edges, rho_work, support_gt,
                             max_iter=UNET_ITER, lr=UNET_LR, sigma0=SIGMA0, unet_seed=UNET_SEED,
-                            out_act='sigmoid', use_hio_feedback=False)
+                            out_act='sigmoid', use_hio_feedback=False, gamma=GAMMA)
 
     # 实验3：UNet + tanh + HIO 反馈
     print("\n" + "=" * 60); print("实验3：UNet + tanh + HIO 反馈"); print("=" * 60)
     best3, hist3 = run_unet(amp_orig, rho_init, ref_edges, rho_work, support_gt,
                             max_iter=UNET_ITER, lr=UNET_LR, sigma0=SIGMA0, unet_seed=UNET_SEED,
-                            out_act='tanh', use_hio_feedback=True, beta=0.7)
+                            out_act='tanh', use_hio_feedback=True, beta=0.7, gamma=GAMMA)
 
     # 各实验出图
     experiments = [

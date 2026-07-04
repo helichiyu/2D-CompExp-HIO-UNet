@@ -3,7 +3,7 @@ unet_pr.py —— 乙方：未训练 UNet 相位恢复（Deep Image Prior 路线
 
 像空间：UNet 输出乘 support 后做 FFT 取振幅，与 |A_orig| 算 MSE，反传更新网络（软学习，对照甲方硬替换）。
 实空间：support 外策略可选——HIO 反馈（ρ_k−β·ρ̃，需可负输出 tanh）或 置 0（配 sigmoid）；
-        support 内正值约束 + 直方图匹配 + shrinkwrap。两种模式供三测对比（见 三测计划.md）。
+        support 内正值约束 + 直方图匹配 + shrinkwrap。两种模式供四测对比（见 四测计划.md）。
 """
 
 import time
@@ -110,7 +110,7 @@ def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
              max_iter=5000, lr=1e-4, beta=0.7,
              out_act='tanh', use_hio_feedback=True,
              sigma0=3.0, sigma_end=1.0, sigma_interval=20, sigma_total=500,
-             eval_every=20, unet_seed=0, align_eval=True):
+             eval_every=20, unet_seed=0, align_eval=True, gamma=0.9):
     """
     未训练 UNet（DIP）迭代。
       amp_orig:         原始振幅（去直流）[1,1,H,W]
@@ -139,9 +139,6 @@ def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
     history = {"iter": [], "loss": []}
     for k in metric_keys:
         history[k] = []
-    best_score = -1.0
-    best_rho = rho_init.clone()
-
     start = time.time()
     for it in range(max_iter):
         optimizer.zero_grad()
@@ -159,7 +156,7 @@ def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
             raw_d = raw.detach()
             if use_hio_feedback:
                 keep = (support > 0.5) & (raw_d >= 0)
-                rho_next = torch.where(keep, raw_d, current_input - beta * raw_d)  # HIO 反馈
+                rho_next = torch.where(keep, raw_d, gamma * current_input - beta * raw_d)  # relaxed HIO（γ<1 防累加发散）
             else:
                 rho_next = raw_d * support                                        # 置 0（support 外=0）
             rho_next = histogram_match(rho_next, support, ref_edges)
@@ -174,10 +171,6 @@ def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
                 history["loss"].append(loss.item())
                 for k in metric_keys:
                     history[k].append(m[k])
-                score = m["ssim"] + m["amp_cc"]
-                if score > best_score:
-                    best_score = score
-                    best_rho = rho_next.clone()
                 elapsed = time.time() - start
                 print(f"[UNet] {it}/{max_iter} | loss {loss.item():.3e} | "
                       f"psnr {m['psnr']:.2f} | ssim {m['ssim']:.3f} | "
@@ -186,4 +179,4 @@ def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
 
             current_input = rho_next.detach()
 
-    return best_rho, history
+    return rho_next, history            # 取末轮（收敛态），不取最优瞬间
