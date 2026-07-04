@@ -6,6 +6,7 @@ __pycache__/
 venv/
 
 # 实验结果产物（运行 main.py 生成，不应上传）
+results/
 result_*.png
 result_*.csv
 result_*.json
