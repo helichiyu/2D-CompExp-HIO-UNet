@@ -24,15 +24,17 @@ print(f"设备: {device}\n")
 rho_work, bg_val, pad_info, H0, W0 = load_and_preprocess('567.png')
 print(f"rho_work {tuple(rho_work.shape)}, bg_val={bg_val:.3f}")
 
+# FFT 往返（保留直流，应精确复原 rho_work）
 amp, phase = fft_amp_phase(rho_work)
 rho_back = ifft_real(amp, phase)
-err = (rho_back - (rho_work - rho_work.mean())).abs().max().item()
-print(f"FFT 往返误差（去直流，应<1e-4）: {err:.2e}")
+err = (rho_back - rho_work).abs().max().item()
+print(f"FFT 往返误差（应≈0，数值精度）: {err:.2e}")
 
-amp_work, _ = fft_amp_phase(rho_work)
-amp_img, _ = fft_amp_phase(bg_val - rho_work)
+# 极性翻转：去直流后，非直流振幅应完全相同（控制变量的数学依据）
+amp_work, _ = fft_amp_phase(rho_work, keep_dc=False)
+amp_img, _ = fft_amp_phase(bg_val - rho_work, keep_dc=False)
 polar_rel = (amp_work - amp_img).abs().max().item() / (amp_work.max().item() + 1e-12)
-print(f"极性翻转振幅相对误差（应≈0）: {polar_rel:.2e}")
+print(f"极性翻转非直流振幅相对误差（应≈0）: {polar_rel:.2e}")
 
 mask = shrinkwrap_support(rho_work, 3.0)
 print(f"support 占比: {mask.mean():.3f}")
