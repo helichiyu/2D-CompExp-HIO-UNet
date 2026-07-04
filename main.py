@@ -1,15 +1,26 @@
 """
-main.py —— 四测：传统 HIO + UNet(sigmoid+置0) + UNet(tanh+HIO反馈) 对比
+main.py —— 五测：HIO / UNet tanh+HIO / UNet sigmoid+置0 三实验对比（均开 HM，各 1200 轮）
+
+三个实验均开 HM、各 1200 轮。五测认知：HIO 收敛是概率性事件——收敛则出轮廓、不收敛则出
+周期斜线，与迭代长度无单调关系（短迭代可能收敛、长迭代可能漂走）。故实验1·HIO 重复 3 次
+（不同相位种子）提高命中收敛的概率，供看图挑选；实验2/3 各单次。
+  实验1·HIO           传统 HIO（relaxed，γ=0.9 防尺度爆炸），重复 3 次
+  实验2·tanh+HIO      UNet tanh + HIO 反馈
+  实验3·sigmoid+置0   UNet sigmoid + support 外置 0
 
 运行：
   D:\\anaconda3\\envs\\use\\python.exe main.py [HIO_ITER] [UNET_ITER]
-  不传参数则用默认 HIO_ITER=30000 / UNET_ITER=5000（长测试）；
-  短测试验证可传小值，如 main.py 100 50。
+  不传参数则用默认 HIO_ITER=UNET_ITER=1200；
+  短测试验证可传小值，如 main.py 20 10（实验1 仍重复 3 次）。
 
 结果输出到 results/run_<时间戳>/，含：
-  exp1_hio/、exp2_unet_sigmoid/、exp3_unet_tanh/  各实验的实空间/振幅谱/support/收敛/指标
-  comparison.png  三实验主指标柱状对比
+  exp1_hio/  real_space_3runs.png（3 次并排挑收敛）+ 代表的实空间/振幅谱/support/收敛/指标
+  exp2_tanh_hio/、exp3_sigmoid/  各实验的实空间/振幅谱/support/收敛/指标
+  comparison.png  三实验主指标柱状对比（实验1 取 3 次中末轮 ssim 最高者作代表）
   comparison.csv  三实验指标汇总
+
+注：ssim/psnr 多数情况有参考价值，但 HIO 的"形态+周期斜线"场景会失真；
+    跑完请先看 real_space.png / real_space_3runs.png 再下结论（见 五测汇报.md）。
 """
 
 import csv
@@ -35,11 +46,10 @@ plt.rcParams['axes.unicode_minus'] = False
 
 # ===================== 超参（默认长测试；可被命令行覆盖）=====================
 SIGMA0 = 3.0
-HIO_ITER = 2000      # 甲方轮次（实测 ~0.10 s/轮）
-UNET_ITER = 600      # 乙方轮次（实验2/3 同，~0.34 s/轮）
+HIO_ITER = 1200     # 甲方轮次（实验1 重复 N_HIO_RUNS 次）
+UNET_ITER = 1200    # 乙方轮次（实验2/3 同）
+N_HIO_RUNS = 3      # 实验1 HIO 重复次数（收敛是概率性事件，多次命中收敛/轮廓）
 UNET_LR = 1e-4
-PHASE_SEED = 42
-UNET_SEED = 0
 GAMMA = 0.9        # relaxed HIO 松弛系数（support 外 γ·ρ − β·ρ′，γ<1 防累加发散；实验1/3 一致）
 
 
@@ -211,34 +221,59 @@ def main():
     print(f"原始 {W0}×{H0} → 扩边+pad 后 {Wp}×{Hp}，bg_val={bg_val:.3f}")
 
     amp_orig, _ = fft_amp_phase(rho_work)
-    phase0 = make_random_phase(rho_work.shape, seed=PHASE_SEED)
+    phase0 = make_random_phase(rho_work.shape)
     rho_init = init_density(amp_orig, phase0)
     support_gt = shrinkwrap_support(rho_work, SIGMA0)
     ref_edges = estimate_reference_histogram(rho_work, support_gt, n_bins=300)
     gt_vis = to_visual(rho_work, bg_val, pad_info)
 
-    # 实验1：传统 HIO（eval_every=100：轮次多，评估间隔放大）
-    print("\n" + "=" * 60); print("实验1：传统 HIO"); print("=" * 60)
-    best1, hist1 = run_hio(amp_orig, rho_init, ref_edges, rho_work, support_gt,
-                           max_iter=HIO_ITER, beta=0.7, sigma0=SIGMA0, eval_every=100, gamma=GAMMA)
+    # 实验1·HIO：重复 3 次（HIO 收敛是概率性事件——收敛出轮廓、不收敛出周期斜线，
+    # 与迭代长度无单调关系；多次短跑提高命中收敛概率，供看图挑选）
+    print("\n" + "=" * 60); print(f"实验1·HIO（重复 {N_HIO_RUNS} 次，各 {HIO_ITER} 轮）"); print("=" * 60)
+    hio_runs = []
+    for k in range(N_HIO_RUNS):
+        print(f"  --- 第 {k + 1}/{N_HIO_RUNS} 次 ---")
+        phase_k = make_random_phase(rho_work.shape)   # 不固定种子，3 次自然不同（GPU 非确定性下固定已无意义，C6）
+        rho_init_k = init_density(amp_orig, phase_k)
+        best_k, hist_k = run_hio(amp_orig, rho_init_k, ref_edges, rho_work, support_gt,
+                                 max_iter=HIO_ITER, beta=0.7, sigma0=SIGMA0, eval_every=100, gamma=GAMMA)
+        hio_runs.append((best_k, hist_k))
+    # comparison 代表：取末轮 ssim 最高者（仅初筛，是否真收敛以 real_space_3runs.png 看图为准）
+    best1, hist1 = max(hio_runs, key=lambda r: r[1]['ssim'][-1])
+    print(f"  → 代表取末轮 ssim 最高者；3 次实空间并排见 exp1_hio/real_space_3runs.png")
 
-    # 实验2：UNet + sigmoid + 置0（无 HIO 反馈）
-    print("\n" + "=" * 60); print("实验2：UNet + sigmoid + 置0（无 HIO 反馈）"); print("=" * 60)
+    # 实验2·tanh+HIO：UNet tanh + HIO 反馈
+    print("\n" + "=" * 60); print("实验2·tanh+HIO"); print("=" * 60)
     best2, hist2 = run_unet(amp_orig, rho_init, ref_edges, rho_work, support_gt,
-                            max_iter=UNET_ITER, lr=UNET_LR, sigma0=SIGMA0, unet_seed=UNET_SEED,
+                            max_iter=UNET_ITER, lr=UNET_LR, sigma0=SIGMA0,
+                            out_act='tanh', use_hio_feedback=True, beta=0.7, gamma=GAMMA)
+
+    # 实验3·sigmoid+置0：sigmoid 输出 + support 外置 0
+    print("\n" + "=" * 60); print("实验3·sigmoid+置0"); print("=" * 60)
+    best3, hist3 = run_unet(amp_orig, rho_init, ref_edges, rho_work, support_gt,
+                            max_iter=UNET_ITER, lr=UNET_LR, sigma0=SIGMA0,
                             out_act='sigmoid', use_hio_feedback=False, gamma=GAMMA)
 
-    # 实验3：UNet + tanh + HIO 反馈
-    print("\n" + "=" * 60); print("实验3：UNet + tanh + HIO 反馈"); print("=" * 60)
-    best3, hist3 = run_unet(amp_orig, rho_init, ref_edges, rho_work, support_gt,
-                            max_iter=UNET_ITER, lr=UNET_LR, sigma0=SIGMA0, unet_seed=UNET_SEED,
-                            out_act='tanh', use_hio_feedback=True, beta=0.7, gamma=GAMMA)
+    # 实验1·HIO 3 次实空间并排（供看图挑收敛：收敛=轮廓，不收敛=周期斜线）
+    exp1_dir = os.path.join(run_dir, 'exp1_hio')
+    os.makedirs(exp1_dir, exist_ok=True)
+    fig, axes = plt.subplots(1, N_HIO_RUNS + 1, figsize=(5 * (N_HIO_RUNS + 1), 5))
+    axes[0].imshow(gt_vis, cmap='gray', vmin=0, vmax=1); axes[0].set_title('原图', fontsize=14); axes[0].axis('off')
+    for i, (best, hist) in enumerate(hio_runs):
+        best_a = register_to_gt(best, rho_work)
+        vis = unpad(bg_val - best_a, pad_info).squeeze().detach().cpu().numpy()
+        axes[i + 1].imshow(vis, cmap='gray', vmin=0, vmax=1)
+        axes[i + 1].set_title(f'第{i + 1}次\nssim={hist["ssim"][-1]:.3f}', fontsize=13)
+        axes[i + 1].axis('off')
+    plt.tight_layout()
+    plt.savefig(os.path.join(exp1_dir, 'real_space_3runs.png'), dpi=150, bbox_inches='tight'); plt.close()
+    print(f"  已保存 exp1_hio/real_space_3runs.png（3 次并排，供挑收敛）")
 
     # 各实验出图
     experiments = [
-        ('exp1_hio', '传统 HIO', best1, hist1, 'amp_residual', '振幅残差'),
-        ('exp2_unet_sigmoid', 'UNet+sigmoid+置0', best2, hist2, 'loss', 'UNet loss'),
-        ('exp3_unet_tanh', 'UNet+tanh+HIO', best3, hist3, 'loss', 'UNet loss'),
+        ('exp1_hio',      '实验1·HIO',         best1, hist1, 'amp_residual', '振幅残差'),
+        ('exp2_tanh_hio', '实验2·tanh+HIO',    best2, hist2, 'loss', 'UNet loss'),
+        ('exp3_sigmoid',  '实验3·sigmoid+置0', best3, hist3, 'loss', 'UNet loss'),
     ]
     for folder, label, best, hist, mon_key, mon_label in experiments:
         dump_experiment(folder, label, best, hist, gt_vis, rho_work, bg_val, pad_info, support_gt, run_dir,

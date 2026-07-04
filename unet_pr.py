@@ -110,7 +110,7 @@ def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
              max_iter=5000, lr=1e-4, beta=0.7,
              out_act='tanh', use_hio_feedback=True,
              sigma0=3.0, sigma_end=1.0, sigma_interval=20, sigma_total=500,
-             eval_every=20, unet_seed=0, align_eval=True, gamma=0.9):
+             eval_every=20, unet_seed=None, align_eval=True, gamma=0.9):
     """
     未训练 UNet（DIP）迭代。
       amp_orig:         原始振幅（去直流）[1,1,H,W]
@@ -123,7 +123,8 @@ def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
       use_hio_feedback: True=support 外用 HIO 反馈；False=support 外置 0
     返回 (best_rho, history)。
     """
-    torch.manual_seed(unet_seed)
+    if unet_seed is not None:
+        torch.manual_seed(unet_seed)
     model = UNet(out_act=out_act).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     mse = nn.MSELoss()

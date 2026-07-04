@@ -96,13 +96,15 @@ def ifft_real(amp, phase):
 
 
 # ===================== 随机相位初始化 =====================
-def make_random_phase(shape, seed=42):
+def make_random_phase(shape, seed=None):
     """
     生成随机相位谱，保证共轭对称（使 IFFT 结果为实数）。
     做法：实噪声 → FFT → 取相位。比手工拼接共轭更稳。
-    甲乙共享同一 seed → 同一初始 ρ_0（控制变量）。
+    seed=None（默认）不固定——GPU 非确定性（C6）下固定种子已无复现意义，每次自然随机；
+    传 seed 则固定（调试用）。实验2/3 共享 ρ_init 是因 main 只算一次，非因种子。
     """
-    torch.manual_seed(seed)
+    if seed is not None:
+        torch.manual_seed(seed)
     noise = torch.randn(shape, device=device)
     F = torch.fft.fft2(noise)
     F[..., 0, 0] = 0
