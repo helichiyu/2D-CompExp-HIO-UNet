@@ -1,9 +1,9 @@
 """
 unet_pr.py —— 乙方：未训练 UNet 相位恢复（Deep Image Prior 路线）
 
-像空间：UNet 输出做 FFT 取振幅，与 |A_orig| 算 MSE，反传更新网络（软学习）。
-实空间：正值（sigmoid 天然 [0,1]）+ support + 直方图匹配 + shrinkwrap，
-        与甲方完全一致（控制变量）。
+像空间：UNet 输出做 FFT 取振幅，与 |A_orig| 算 MSE，反传更新网络（软学习，对照甲方硬替换）。
+实空间：HIO 反馈公式（support 内保留 ρ̃ / support 外 ρ_k−β·ρ̃）+ 直方图匹配 + shrinkwrap，
+        与甲方逐字对齐（控制变量；二测修复：补齐此前缺失的 HIO 反馈项）。
 """
 
 import time
@@ -107,7 +107,7 @@ class UNet(nn.Module):
 
 # ===================== 未训练 UNet 迭代 =====================
 def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
-             max_iter=5000, lr=1e-4,
+             max_iter=5000, lr=1e-4, beta=0.7,
              sigma0=3.0, sigma_end=1.0, sigma_interval=20, sigma_total=500,
              eval_every=20, unet_seed=0):
     """
@@ -117,6 +117,7 @@ def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
       ref_edges:  HM 参考直方图分箱边界
       gt:         真值密度（评估用）
       support_gt: 真值支撑域（评估用）
+      beta:       HIO 反馈系数（与甲方一致，默认 0.7）
     返回 (best_rho, history)。
     """
     torch.manual_seed(unet_seed)
@@ -142,21 +143,19 @@ def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
     for it in range(max_iter):
         optimizer.zero_grad()
 
-        # === UNet 前向（sigmoid 输出 [0,1]，天然非负）===
-        raw = model(current_input)
-
-        # === 实空间约束（可微部分，进 loss 路径，与甲方对齐）===
-        rho_c = raw.clamp_min(0) * support  # 正值 + support 外置 0
-
-        # === 像空间：FFT 取振幅 → MSE → 反传（唯一变量）===
-        amp_pred = fft_amp_phase(rho_c)[0] / amp_max
+        # === 像空间（乙方唯一变量）：UNet 前向 → 振幅 MSE 反传（对照甲方硬替换）===
+        raw = model(current_input)                              # ρ̃，sigmoid [0,1]，天然非负
+        amp_pred = fft_amp_phase(raw)[0] / amp_max              # 全局振幅（不预先 ×support，对齐甲方全局替换）
         loss = mse(amp_pred, amp_orig_norm)
         loss.backward()
         optimizer.step()
 
-        # === 实空间约束（非可微 HM，对 detach 输出施加，喂回下一轮）===
+        # === 实空间（与甲方对齐）：HIO 反馈公式 + 动态 support + HM ===
         with torch.no_grad():
-            rho_next = histogram_match(rho_c.detach(), support, ref_edges)
+            raw_d = raw.detach()
+            keep = (support > 0.5) & (raw_d >= 0)
+            rho_next = torch.where(keep, raw_d, current_input - beta * raw_d)  # 补上 HIO 反馈项
+            rho_next = histogram_match(rho_next, support, ref_edges)
 
             if it > 0 and it % sigma_interval == 0:
                 sigma = sigma_schedule(it, sigma0, sigma_end, sigma_total)
