@@ -1,9 +1,9 @@
 """
 unet_pr.py —— 乙方：未训练 UNet 相位恢复（Deep Image Prior 路线）
 
-像空间：UNet 输出（tanh）乘 support 后做 FFT 取振幅，与 |A_orig| 算 MSE，反传更新网络（软学习，对照甲方硬替换）。
-实空间：HIO 反馈公式（support 内 ρ̃≥0 保留 / support 外 ρ_k−β·ρ̃）+ 直方图匹配 + shrinkwrap，
-        与甲方逐字对齐（控制变量；输出层 tanh 有界且可负，正值约束由 HIO 反馈 keep 条件实现）。
+像空间：UNet 输出乘 support 后做 FFT 取振幅，与 |A_orig| 算 MSE，反传更新网络（软学习，对照甲方硬替换）。
+实空间：support 外策略可选——HIO 反馈（ρ_k−β·ρ̃，需可负输出 tanh）或 置 0（配 sigmoid）；
+        support 内正值约束 + 直方图匹配 + shrinkwrap。两种模式供三测对比（见 三测计划.md）。
 """
 
 import time
@@ -63,21 +63,21 @@ class Up(nn.Module):
 
 
 class OutConv(nn.Module):
-    """1x1 卷积 + Tanh，输出有界 [-1,1] 且可负（扮演甲方 ρ′，正值约束由 HIO 反馈 keep 条件实现）。"""
+    """1x1 卷积 + 激活。act='sigmoid' 输出 [0,1] 恒正（配 置0）；'tanh' 输出 [-1,1] 可负（配 HIO 反馈）。"""
 
-    def __init__(self, in_ch, out_ch):
+    def __init__(self, in_ch, out_ch, act='tanh'):
         super().__init__()
         self.conv = nn.Conv2d(in_ch, out_ch, 1)
-        self.act = nn.Tanh()
+        self.act = nn.Sigmoid() if act == 'sigmoid' else nn.Tanh()
 
     def forward(self, x):
         return self.act(self.conv(x))
 
 
 class UNet(nn.Module):
-    """5 级下采样 UNet，bilinear 上采样，瓶颈通道减半。"""
+    """5 级下采样 UNet，bilinear 上采样，瓶颈通道减半。out_act 选输出层激活（sigmoid/tanh）。"""
 
-    def __init__(self, n_channels=1, n_classes=1):
+    def __init__(self, n_channels=1, n_classes=1, out_act='tanh'):
         super().__init__()
         factor = 2  # bilinear 时瓶颈通道减半
         self.inc = DoubleConv(n_channels, 64)
@@ -90,7 +90,7 @@ class UNet(nn.Module):
         self.up2 = Up(512, 256 // factor)
         self.up3 = Up(256, 128 // factor)
         self.up4 = Up(128, 64)
-        self.outc = OutConv(64, n_classes)
+        self.outc = OutConv(64, n_classes, act=out_act)
 
     def forward(self, x):
         x1 = self.inc(x)
@@ -108,20 +108,23 @@ class UNet(nn.Module):
 # ===================== 未训练 UNet 迭代 =====================
 def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
              max_iter=5000, lr=1e-4, beta=0.7,
+             out_act='tanh', use_hio_feedback=True,
              sigma0=3.0, sigma_end=1.0, sigma_interval=20, sigma_total=500,
              eval_every=20, unet_seed=0):
     """
     未训练 UNet（DIP）迭代。
-      amp_orig:   原始振幅（去直流）[1,1,H,W]
-      rho_init:   初始实空间密度 ρ_0（第一轮"先实空间"起手）
-      ref_edges:  HM 参考直方图分箱边界
-      gt:         真值密度（评估用）
-      support_gt: 真值支撑域（评估用）
-      beta:       HIO 反馈系数（与甲方一致，默认 0.7）
+      amp_orig:         原始振幅（去直流）[1,1,H,W]
+      rho_init:         初始实空间密度 ρ_0
+      ref_edges:        HM 参考直方图分箱边界
+      gt:               真值密度（评估用）
+      support_gt:       真值支撑域（评估用）
+      beta:             HIO 反馈系数（use_hio_feedback=True 时用，默认 0.7）
+      out_act:          输出层激活：'sigmoid'（[0,1]恒正，配 置0）/ 'tanh'（[-1,1]可负，配 HIO 反馈）
+      use_hio_feedback: True=support 外用 HIO 反馈；False=support 外置 0
     返回 (best_rho, history)。
     """
     torch.manual_seed(unet_seed)
-    model = UNet().to(device)
+    model = UNet(out_act=out_act).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     mse = nn.MSELoss()
 
@@ -144,18 +147,21 @@ def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
         optimizer.zero_grad()
 
         # === 像空间（乙方唯一变量）：UNet 前向 → 振幅 MSE 反传（对照甲方硬替换）===
-        raw = model(current_input)                              # ρ̃，tanh 输出 [-1,1]（可负），扮演甲方 ρ′
-        rho_c = raw * support                                   # 候选密度，support 外置 0（最终输出与评估均用它）
+        raw = model(current_input)                              # ρ̃，输出层由 out_act 决定（sigmoid/tanh）
+        rho_c = raw * support                                   # 候选密度，support 外置 0（振幅 loss / 最终输出 / 评估均用它）
         amp_pred = fft_amp_phase(rho_c)[0] / amp_max            # 振幅 loss 作用在 raw×support
         loss = mse(amp_pred, amp_orig_norm)
         loss.backward()
         optimizer.step()
 
-        # === 实空间（与甲方对齐）：HIO 反馈公式 + 动态 support + HM ===
+        # === 实空间：support 外策略可选（HIO 反馈 / 置 0）+ 动态 support + HM ===
         with torch.no_grad():
             raw_d = raw.detach()
-            keep = (support > 0.5) & (raw_d >= 0)
-            rho_next = torch.where(keep, raw_d, current_input - beta * raw_d)  # 补上 HIO 反馈项
+            if use_hio_feedback:
+                keep = (support > 0.5) & (raw_d >= 0)
+                rho_next = torch.where(keep, raw_d, current_input - beta * raw_d)  # HIO 反馈
+            else:
+                rho_next = raw_d * support                                        # 置 0（support 外=0）
             rho_next = histogram_match(rho_next, support, ref_edges)
 
             if it > 0 and it % sigma_interval == 0:
