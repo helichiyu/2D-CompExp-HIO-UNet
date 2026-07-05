@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from utils import (fft_amp_phase, shrinkwrap_support, sigma_schedule,
-                   histogram_match, evaluate_all, device)
+                   histogram_match, evaluate_all, device, proj_S)
 
 
 # ===================== UNet 结构（自己重写，InstanceNorm 适配单图训练）=====================
@@ -186,3 +186,74 @@ def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
             current_input = rho_next.detach()
 
     return rho_next, history            # 取末轮（收敛态），不取最优瞬间
+
+
+# ===================== UNet + RAAR 融合（十测主菜）=====================
+def run_unet_raar(amp_orig, rho_init, ref_edges, gt, support_gt,
+                  max_iter=1500, lr=1e-4, beta=0.7,
+                  out_act='tanh',
+                  sigma0=3.0, sigma_end=1.0, sigma_interval=20, sigma_total=200,
+                  eval_every=20, unet_seed=None, align_eval=True, warmup=0):
+    """
+    UNet + RAAR 融合：RAAR 反射骨架一字不改，P_M 从硬替换换成 UNet 软约束。
+      像空间 P_M：UNet(r_s) 前向 → 全图振幅 MSE 反传训练（UNet 当软振幅投影器）。
+      实空间 R_S / 反射组合 / β松弛：与纯 RAAR 逐字一致（背景干净的来源不变）。
+    UNet 平滑先验顺带画清中心物体——目标：RAAR 干净背景 + UNet 中心质量（C15+C16 互补）。
+    返回 (rho_end, history)，取末轮。详见 十测计划.md §3.1。
+    """
+    if unet_seed is not None:
+        torch.manual_seed(unet_seed)
+    model = UNet(out_act=out_act).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    mse = nn.MSELoss()
+
+    amp_max = amp_orig.max().detach() + 1e-12
+    amp_orig_norm = amp_orig / amp_max
+    _, phase_orig = fft_amp_phase(gt)
+
+    x = rho_init.detach().clone()
+    support = shrinkwrap_support(rho_init, sigma0)
+
+    metric_keys = ["psnr", "ssim", "pearson_cc", "amp_cc", "phase_err", "support_iou"]
+    history = {"iter": [], "loss": [], "amp_residual": []}
+    for k in metric_keys:
+        history[k] = []
+    start = time.time()
+    for it in range(max_iter):
+        # ① 实空间反射 R_S（no_grad，与纯 RAAR 一致）
+        with torch.no_grad():
+            r_s = 2 * proj_S(x, support) - x
+
+        # ② P_M 换 UNet 软约束（带梯度，唯一改动）
+        optimizer.zero_grad()
+        raw = model(r_s.detach())                              # UNet 吃 r_s，tanh 输出 [-1,1]
+        amp_pred = fft_amp_phase(raw)[0] / amp_max             # 全图振幅（对齐 P_M 全图 FFT 语义）
+        loss = mse(amp_pred, amp_orig_norm)
+        loss.backward()
+        optimizer.step()
+
+        # ③ 反射组合（no_grad，与纯 RAAR 一致）
+        with torch.no_grad():
+            proj_M_val = raw.detach()                          # UNet 输出顶替 P_M(r_s)
+            r_m = 2 * proj_M_val - r_s                         # R_M = 2·P_M − r_s
+            x_next = (beta / 2) * (r_m + x) + (1 - beta) * r_s  # β 松弛平均（β=0.7）
+            x_next = histogram_match(x_next, support, ref_edges)
+            if it >= warmup and it % sigma_interval == 0:      # 动态 support，沿用 RAAR 节奏
+                sigma = sigma_schedule(it - warmup, sigma0, sigma_end, sigma_total)
+                support = shrinkwrap_support(x_next, sigma)
+            if it % eval_every == 0:
+                m = evaluate_all(x_next, gt, amp_orig, phase_orig, support_gt, align_to_gt=align_eval)
+                amp_res = ((fft_amp_phase(x_next)[0] - amp_orig).norm() / (amp_orig.norm() + 1e-12)).item()
+                history["iter"].append(it)
+                history["loss"].append(loss.item())
+                history["amp_residual"].append(amp_res)
+                for k in metric_keys:
+                    history[k].append(m[k])
+                elapsed = time.time() - start
+                print(f"[UNet+RAAR] {it}/{max_iter} | loss {loss.item():.3e} | "
+                      f"psnr {m['psnr']:.2f} | ssim {m['ssim']:.3f} | "
+                      f"amp_cc {m['amp_cc']:.3f} | Δφ {m['phase_err']:.3f} | "
+                      f"iou {m['support_iou']:.3f} | {elapsed:.1f}s")
+            x = x_next.detach()
+
+    return x_next, history
