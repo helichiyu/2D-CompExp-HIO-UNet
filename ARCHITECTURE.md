@@ -1,12 +1,12 @@
 # 架构说明
 
-> 六测（2026-07）后更新：跑五测铺好的新矩阵（三实验均开 HM、各 1200 轮、实验1·HIO 重复 3 次）。核心：三种方法都是概率恢复（C12）、sigmoid 1200 轮内相变最好、HIO 出现"中心轮廓 + 轮廓循环"中间态。项目背景见 [README.md](README.md)，理论见 [调研报告.md](调研报告.md)，六测发现见 [六测汇报.md](六测汇报.md)。
+> 七测（2026-07）后更新：大规模重复取统计（10 组 × 5 实验 = 50 个，HIO 5000 轮 ×3 + UNet 1500 轮 ×2）。核心：三方法命中率统计（C12）、sigmoid 相变质量最好（C13）、HIO 能恢复但长迭代必出周期斜线（C2/C14，FFT 卷绕）。项目背景见 [README.md](README.md)，理论见 [调研报告.md](调研报告.md)，七测发现见 [七测汇报.md](七测汇报.md)。
 
 ---
 
 ## 1. 概述
 
-控制变量法对比**三种**二维相位恢复方法（实验1 HIO / 实验2 UNet+tanh+HIO / 实验3 UNet+sigmoid+置0，均开 HM、各 1200 轮）。三者共享实空间约束，差异在像空间处理、support 外策略、输出层。实验1·HIO 重复 3 次（收敛概率性，多次撞收敛）。**评估前配准**（消除平凡歧义）。三层职责：工具层（`utils`）、方法层（`hio` / `unet_pr`）、编排层（`main`）。
+控制变量法对比**三种**二维相位恢复方法（实验1 HIO / 实验2 UNet+tanh+HIO / 实验3 UNet+sigmoid+置0，均开 HM），并**多次独立重复取统计**（七测：10 组 × 5 实验 = 50 个；HIO 5000 轮 ×3 + UNet 1500 轮 ×2）。三者共享实空间约束，差异在像空间处理、support 外策略、输出层。**评估前配准**（消除平凡歧义）。三层职责：工具层（`utils`）、方法层（`hio` / `unet_pr`）、编排层（`main`）。
 
 ---
 
@@ -17,7 +17,7 @@
 | `utils.py`（工具层） | 共用基础设施：预处理、可微 FFT/IFFT、随机相位、shrinkwrap、直方图匹配、**配准**、评估 | `load_and_preprocess`、`fft_amp_phase`、`ifft_real`、`make_random_phase`、`init_density`、`shrinkwrap_support`、`estimate_reference_histogram`、`histogram_match`、**`register_to_gt`**、`evaluate_all`、`device` |
 | `hio.py`（方法层·实验1） | 严格 HIO：像空间硬替换振幅 + 实空间 relaxed HIO 反馈 + HM（实验1 重复 3 次） | `run_hio` |
 | `unet_pr.py`（方法层·实验2/3） | 未训练 UNet：UNet（输出层 sigmoid/tanh 可选）+ 像空间振幅 MSE 反传（support 外置0/HIO反馈可选） | `UNet`、`run_unet` |
-| `main.py`（编排层） | 读图 → 三实验（实验1×3）→ 各出图 + 实验1 3 次并排 + 横向对比 | `main` |
+| `main.py`（编排层） | 读图 → 10 组 × 5 实验（HIO×3 + UNet×2）→ 各出图 + 每组并排/对比 + summary + 断点续跑 | `main` |
 
 `smoke_test.py` / `_probe_unet.py` 是验证/探测脚本，非核心架构。
 
@@ -61,11 +61,13 @@ rho_work（暗背景，[1,1,H,W]）
    （取末轮ssim最高代表）
        └────────────────────┴─────────────────────┘
                             ▼
-        实验1：3 次并排 real_space_3runs.png（供看图挑收敛）
-        dump_experiment：register_to_gt（配准出图）+ evaluate_all（配准评估）
-        + 存 history.csv（全程）/ metrics.csv（末轮）/ state.pt（张量）
+        每个实验 dump_experiment：register_to_gt（配准出图）+ evaluate_all（配准评估）
+        + hio_3runs.png（HIO 3 次并排挑收敛）+ history.csv（全程）/ metrics.csv（末轮）/ state.pt
+        + 每组 comparison_gXx.png/csv（组内三方法末轮对比）
                             ▼
-                  comparison.png / comparison.csv（三实验末轮对比）
+        外层 10 组循环（progress.json 记每组完成，支持断点续跑）
+                            ▼
+                  summary.csv（50 实验末轮指标汇总）
 ```
 
 ---
@@ -96,8 +98,8 @@ rho_work（暗背景，[1,1,H,W]）
 ### 5.8 取末轮（新）
 `best_rho` / `best_point` 取末轮（收敛态），不取最优瞬间（cherry-pick，可能选不稳定峰值）。
 
-### 5.9 轮次与重复（五测改）
-五测起统一 1200 轮（收敛是早期概率命中，长迭代无益甚至有害，见 C10/R10）；实验1·HIO 重复 3 次（不同 phase seed，收敛概率性，多次撞收敛），取末轮 ssim 最高者作 comparison 代表，另出 3 次并排图 `real_space_3runs.png` 供看图挑选。
+### 5.9 轮次、重复与断点续跑（七测改）
+一组 = HIO 5000 轮 ×3 + UNet 1500 轮 ×2；外层 10 组独立重复取统计（C12）。组间差异来自随机性（phase seed 不固定 + CUDA 非确定性 C6），即 10 次独立样本。每组 HIO 取末轮 ssim 最高者作该组 comparison 代表，另出 `hio_3runs.png` 供看图挑收敛。**断点续跑**：`progress.json` 记 `done_groups`，续跑时跳过已完成组、校验 iter 配置一致。
 
 ### 5.10 数值约定
 图像全程 [0,1]；振幅 `amp/amp.max()` 归一化算 loss；张量 `[1,1,H,W]` float32；pad 到 32 的倍数（UNet 5 级下采样）。
@@ -126,26 +128,28 @@ rho_work（暗背景，[1,1,H,W]）
 ├── utils.py             工具层（含配准 register_to_gt）
 ├── hio.py               实验1：严格 HIO
 ├── unet_pr.py           实验2/3：UNet（输出层/support外可选）
-├── main.py              编排层：三实验（实验1×3）对比入口
+├── main.py              编排层：10 组 × 5 实验（HIO×3+UNet×2）对比入口 + 断点续跑
 ├── smoke_test.py        初测验证脚本
 ├── _probe_unet.py       二测 UNet 探测脚本
 ├── README.md / ARCHITECTURE.md / CLAUDE.md
 ├── 调研报告.md          文献调研 + 30 篇参考文献
 ├── 实现方案.md          函数级实现方案
-├── 初测/二测/四测/五测/六测汇报.md
-├── 实验猜想与结论.md    猜想与结论（六测后修订）
+├── 各测汇报.md（初测/二测/四测/五测/六测/七测）
+├── 各测计划.md（三测/六测/七测）
+├── 实验猜想与结论.md    猜想与结论（七测后修订）
 ├── .gitignore
-└── results/run_<时间戳>/  产物（gitignore）
+└── results/run_<时间戳>/  产物（gitignore，含 group01..10/ + summary.csv）
 ```
 
 ---
 
-## 8. 已知问题（六测状态，详见 [实验猜想与结论.md](实验猜想与结论.md)）
+## 8. 已知问题（七测状态，详见 [实验猜想与结论.md](实验猜想与结论.md)）
 
-1. **三种方法概率恢复**（C12，六测核心）：HIO / sigmoid / tanh+HIO 单次结果都随机，最终结论需多次跑取统计。
-2. **HIO 非收敛有多态**（C10 细化）：六测看到"中心轮廓 + 周边轮廓循环"中间态（非仅周期斜线），3 次都没收敛。
-3. **~~support 自锁~~（C7 已推翻）**：sigmoid 慢相变收敛（六测 1200 轮内 ssim 0.952），非死锁。
-4. **尺度发散已修复**（C8）：relaxed HIO（γ=0.9）防 −38 爆炸；但末轮尺度漂移方差大（五测 +4.85 / 六测 −5.63）。
-5. **twin image / 十字星**（C11，待查）：五测 twin image、六测未复现而出现配准十字星伪影，待多次跑判明。
-6. **CUDA 非确定性**（C6）：UNet 不可复现，需多次跑取统计。
-7. **amp_cc/ssim 局限**（C9/R5）：amp_cc 与形态脱钩；ssim 在值域漂移、轮廓循环场景失真（六测 tanh+HIO ssim 0.819 假阳）。以看图为准。
+1. **三方法概率恢复，已有命中率**（C12 统计性）：HIO 0/30、tanh+HIO 7/10（指标虚高）、sigmoid 2/10（质量最好）。
+2. **HIO 能恢复但长迭代必出周期斜线**（C2/C14 大推翻）：5000 轮 × 30 次每张中间有物体但被斜线淹没；主因 = HIO 负反馈震荡/stagnation（sigmoid 无反馈丝滑为证），FFT 卷绕次要（padding 充足）。
+3. **sigmoid 相变质量最佳**（C13）：曲线丝滑无震荡，UNet 先验抑制卷绕条纹；但相变仅 20% 概率。
+4. **~~support 自锁~~（C7 已推翻）**：sigmoid 慢相变收敛，非死锁。
+5. **尺度发散已修复**（C8）：relaxed HIO 防 −38 爆炸；末轮尺度漂移方差大（tanh+HIO psnr 七测 −11.8 ~ +14.3）。
+6. **twin image / 十字星**（C11，待查）：七测 tanh+HIO 70% 有轮廓但未完全恢复，典型 twin image 未再见。
+7. **CUDA 非确定性**（C6）：UNet 不可复现，多次跑取统计。
+8. **指标虚高**（R5 强化）：iou/amp_cc 高的 tanh+HIO 也只"一点轮廓"；曲线丝滑才是真收敛信号。
