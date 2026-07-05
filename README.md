@@ -40,7 +40,7 @@ X 射线晶体学 / 相干衍射成像中，探测器只能测得傅里叶振幅
 D:\anaconda3\envs\use\python.exe main.py [HIO_ITER] [UNET_ITER] [RUN_DIR]
 ```
 
-默认 `HIO_ITER=5000`、`UNET_ITER=1500`、`N_GROUPS=10`（10 组 × 5 实验 = 50 个，约数小时）。第三参数 `RUN_DIR` 可选——不传则新建 `results/run_<时间戳>/`，传则**续跑**该目录（跳过已完成组）。
+默认 `HIO_ITER=5000`（HIO/DM）、`RAAR_ITER=2000`、`UNET_ITER=1500`、`N_GROUPS=5`（5 组 × 5 法 = 25 个）。第三参数 `RUN_DIR` 可选——不传则新建 `results/run_<时间戳>/`，传则**续跑**该目录（跳过已完成组）。
 
 短测验证可传小值：
 
@@ -79,7 +79,9 @@ D:\anaconda3\envs\use\python.exe main.py 20 10     # 10 组 × 短轮次，约 4
 | 文件 | 作用 |
 |---|---|
 | `utils.py` | 甲乙共用工具：预处理、可微 FFT/IFFT、随机相位、shrinkwrap、直方图匹配、**配准 `register_to_gt`**、评估指标 `evaluate_all` |
-| `hio.py` | 实验1：`run_hio()` 严格 HIO 迭代（β=0.7） |
+| `hio.py` | 实验1：`run_hio()` 严格 HIO 迭代（β=0.7, γ=0.7） |
+| `raar.py` | 九测：`run_raar()` RAAR 反射迭代（β=0.7，破 C14） |
+| `dm.py` | 九测：`run_dm()` Difference Map 迭代（β=1.1，已排除） |
 | `unet_pr.py` | 实验2/3：`UNet` 类（输出层 sigmoid/tanh 可选）+ `run_unet()`（support 外置0/HIO反馈可选） |
 | `main.py` | 入口：读图 → 10 组 × 5 实验（HIO×3 + UNet×2）→ 各出图 + 横向对比 + summary（支持断点续跑） |
 | `smoke_test.py` | 初测验证脚本（短迭代） |
@@ -103,7 +105,7 @@ D:\anaconda3\envs\use\python.exe main.py 20 10     # 10 组 × 短轮次，约 4
 
 4. **输出层参数化**：`OutConv` 激活可选——`sigmoid`（[0,1] 恒正，配 support 外置0）/ `tanh`（[−1,1] 可负，配 HIO 反馈）。
 
-5. **support 外策略**：置 0（实验2，天然有界）/ **relaxed HIO** `γ·ρ−β·ρ′`（实验1/3，γ<1 防累加发散，γ=0.9）。
+5. **support 外策略**：置 0（实验2，天然有界）/ **relaxed HIO** `γ·ρ−β·ρ′`（实验1/3，γ<1 防累加发散，γ=0.7；八测扫 γ 定位 0.7 优于 0.9）。
 
 6. **shrinkwrap 动态支撑域**：高斯模糊 + 阈值二值化估物体区域，不偷看原图。σ 线性衰减（3.0→1.0），周期更新。
 
@@ -144,3 +146,12 @@ D:\anaconda3\envs\use\python.exe main.py 20 10     # 10 组 × 短轮次，约 4
 - **CUDA 非确定性**（C6）：UNet 不可复现，多次跑取统计。
 
 详见 [实验猜想与结论.md](实验猜想与结论.md)、[七测汇报.md](七测汇报.md)。后续（八测）：ER+HIO 交替（主攻 HIO 震荡）、多次重建对齐平均、PRTF 客观评估。
+
+**九测状态（看图为准）**：矩阵扩成 5 法（HIO/RAAR/DM + tanh/sigmoid），5 组 × 5 实验。
+- **RAAR 反射框架破 C14（C15）**：5/5 稳定 ssim 0.945–0.951、曲线丝滑、**背景干净无杂项**——项目首次拿到不靠概率的稳定高质量恢复。
+- **DM β=1.1 排除**：5/5 ssim 0.10，本 setup 不工作。
+- **γ=0.7 抑制 HIO 斜线**（C14 细化）：5000 轮无周期斜线，但指标仍震荡未收敛（γ 治斜线不治震荡）。
+- **tanh/sigmoid UNet 通病（C16）**：中心物体质量高（部分超 RAAR），但背景斑杂/杂项多；RAAR 干净背景反衬此通病。
+- **十测方向**：结合 RAAR（干净背景）+ UNet（中心质量）；tanh+HIO 试 γ=0.8。
+
+详见 [九测汇报.md](九测汇报.md)。
