@@ -110,7 +110,8 @@ def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
              max_iter=5000, lr=1e-4, beta=0.7,
              out_act='tanh', use_hio_feedback=True,
              sigma0=3.0, sigma_end=1.0, sigma_interval=20, sigma_total=500,
-             eval_every=20, unet_seed=None, align_eval=True, gamma=0.9):
+             eval_every=20, unet_seed=None, align_eval=True, gamma=0.9,
+             loss_scope='support'):
     """
     未训练 UNet（DIP）迭代。
       amp_orig:         原始振幅（去直流）[1,1,H,W]
@@ -121,6 +122,7 @@ def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
       beta:             HIO 反馈系数（use_hio_feedback=True 时用，默认 0.7）
       out_act:          输出层激活：'sigmoid'（[0,1]恒正，配 置0）/ 'tanh'（[-1,1]可负，配 HIO 反馈）
       use_hio_feedback: True=support 外用 HIO 反馈；False=support 外置 0
+      loss_scope:       'support'（默认，原样 fft(raw*support) 振幅）/ 'full'（fft(raw) 全图振幅，给 support 外补梯度，验 C16）
     返回 (best_rho, history)。
     """
     if unet_seed is not None:
@@ -146,8 +148,11 @@ def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
 
         # === 像空间（乙方唯一变量）：UNet 前向 → 振幅 MSE 反传（对照甲方硬替换）===
         raw = model(current_input)                              # ρ̃，输出层由 out_act 决定（sigmoid/tanh）
-        rho_c = raw * support                                   # 候选密度，support 外置 0（振幅 loss / 最终输出 / 评估均用它）
-        amp_pred = fft_amp_phase(rho_c)[0] / amp_max            # 振幅 loss 作用在 raw×support
+        if loss_scope == 'full':
+            amp_pred = fft_amp_phase(raw)[0] / amp_max          # 全图振幅（C16 猜想：给 support 外补梯度）
+        else:
+            rho_c = raw * support                               # support 内（原样）：support 外置 0
+            amp_pred = fft_amp_phase(rho_c)[0] / amp_max
         loss = mse(amp_pred, amp_orig_norm)
         loss.backward()
         optimizer.step()
