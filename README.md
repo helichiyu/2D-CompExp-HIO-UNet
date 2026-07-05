@@ -40,7 +40,7 @@ X 射线晶体学 / 相干衍射成像中，探测器只能测得傅里叶振幅
 D:\anaconda3\envs\use\python.exe main.py [HIO_ITER] [UNET_ITER] [RUN_DIR]
 ```
 
-默认 `HIO_ITER=5000`（HIO/DM）、`RAAR_ITER=2000`、`UNET_ITER=1500`、`N_GROUPS=5`（5 组 × 5 法 = 25 个）。第三参数 `RUN_DIR` 可选——不传则新建 `results/run_<时间戳>/`，传则**续跑**该目录（跳过已完成组）。
+默认 `HIO_ITER=5000`、`RAAR_ITER=2000`、`UNET_ITER=2000`（=RAAR_ITER，控制变量对齐核心对照 P_M 实现）、`N_GROUPS=5`（5 组 × 4 法 = 20 个：HIO / tanh_full / RAAR / unet_raar）。第三参数 `RUN_DIR` 可选——不传则新建 `results/run_<时间戳>/`，传则**续跑**该目录（跳过已完成组）。
 
 短测验证可传小值：
 
@@ -78,12 +78,12 @@ D:\anaconda3\envs\use\python.exe main.py 20 10     # 10 组 × 短轮次，约 4
 
 | 文件 | 作用 |
 |---|---|
-| `utils.py` | 甲乙共用工具：预处理、可微 FFT/IFFT、随机相位、shrinkwrap、直方图匹配、**配准 `register_to_gt`**、评估指标 `evaluate_all` |
+| `utils.py` | 甲乙共用工具：预处理、可微 FFT/IFFT、随机相位、shrinkwrap、直方图匹配、**实空间投影 `proj_S`**（RAAR 反射用，十测从 raar.py 提公共）、**配准 `register_to_gt`**、评估指标 `evaluate_all` |
 | `hio.py` | 实验1：`run_hio()` 严格 HIO 迭代（β=0.7, γ=0.7） |
 | `raar.py` | 九测：`run_raar()` RAAR 反射迭代（β=0.7，破 C14） |
 | `dm.py` | 九测：`run_dm()` Difference Map 迭代（β=1.1，已排除） |
-| `unet_pr.py` | 实验2/3：`UNet` 类（输出层 sigmoid/tanh 可选）+ `run_unet()`（support 外置0/HIO反馈可选） |
-| `main.py` | 入口：读图 → 10 组 × 5 实验（HIO×3 + UNet×2）→ 各出图 + 横向对比 + summary（支持断点续跑） |
+| `unet_pr.py` | `UNet` 类（输出层 sigmoid/tanh 可选）+ `run_unet()`（support 外置0/HIO反馈可选，`loss_scope` support/full 验 C16）+ `run_unet_raar()`（RAAR 骨架 + P_M 换 UNet 软约束，十测主菜） |
+| `main.py` | 入口：读图 → 5 组 × 4 法（HIO / tanh_full / RAAR / unet_raar）→ 各出图 + 横向对比 + summary（支持断点续跑） |
 | `smoke_test.py` | 初测验证脚本（短迭代） |
 | `_probe_unet.py` | 二测 UNet 探测脚本 |
 | `567.png` | 输入图（白背景 + 暗物体） |
@@ -155,3 +155,11 @@ D:\anaconda3\envs\use\python.exe main.py 20 10     # 10 组 × 短轮次，约 4
 - **十测方向**：结合 RAAR（干净背景）+ UNet（中心质量）；tanh+HIO 试 γ=0.8。
 
 详见 [九测汇报.md](九测汇报.md)。
+
+**十测状态（看图为准）**：矩阵 4 法（HIO / tanh_full / RAAR / unet_raar），5 组 × 4 法 = 20 个；核心对照 P_M 实现（raar vs unet_raar）轮次对齐 2000。
+- **unet_raar 命题失败（C18）**：UNet 软约束替代 P_M 引入不稳定性——5 组 ssim 0.619–0.938（vs RAAR 5/5 稳定 0.946–0.952），组4 在 1700 轮 ssim 0.926→0.640 突崩（loss 仍降、相位发散）；4/5 组中心 psnr 未超 RAAR。**RAAR 对 P_M 精确性敏感，近似投影不能替代硬替换。**
+- **C16 归因成立（C17）**：tanh_full 全图 loss 背景比 support 内 loss 干净（loss 作用域是 C16 主因），代价是中心梯度被分摊（psnr 8.6–11.7）。
+- **γ=0.8 折中失败**：HIO 5/5 ssim 0.215–0.292，与 γ=0.7 无改善，HIO 调参无救。
+- **纯 RAAR 仍是当前最优基线**（C15），后续以 RAAR 为底。
+
+详见 [十测汇报.md](十测汇报.md)。

@@ -7,14 +7,15 @@ main.py —— 十测：4 法 × N 组对比矩阵（HIO / tanh_full / RAAR / un
 
 每组 4 个实验位（十测矩阵）：
   hio         纯迭代 HIO（relaxed γ=0.8），5000 轮，独立 phase seed
-  tanh_full   UNet tanh + HIO 反馈 + 全图 loss，1500 轮
+  tanh_full   UNet tanh + HIO 反馈 + 全图 loss，2000 轮
   raar        纯迭代 RAAR（β=0.7），2000 轮
-  unet_raar   UNet + RAAR 融合（β=0.7），1500 轮
+  unet_raar   UNet + RAAR 融合（β=0.7），2000 轮（=raar 同轮次，控制变量对齐核心对照 P_M 实现）
 
 运行：
   D:\\anaconda3\\envs\\use\\python.exe main.py [HIO_ITER] [UNET_ITER] [RUN_DIR]
   不传 RUN_DIR → 新建 results/run_<时间戳>/；传 RUN_DIR → 续跑该目录（跳过已完成组）。
-  默认 HIO_ITER=5000、RAAR_ITER=2000、UNET_ITER=1500、N_GROUPS=5。
+  默认 HIO_ITER=5000、RAAR_ITER=2000、UNET_ITER=2000、N_GROUPS=5。
+  （tanh_full/unet_raar 同用 UNET_ITER=2000=RAAR_ITER，保组3 raar vs 组4 unet_raar 轮次一致。）
 
 结果输出到 results/run_<时间戳>/，含：
   config.txt / progress.json
@@ -51,7 +52,7 @@ plt.rcParams['axes.unicode_minus'] = False
 SIGMA0 = 3.0
 HIO_ITER = 5000     # HIO 轮次（十测组1，relaxed gamma=0.8）
 RAAR_ITER = 2000    # RAAR 轮次（单跑 1500 已收敛 ssim 0.95，2000 足够省时）
-UNET_ITER = 1500    # UNet 类轮次（tanh_full / unet_raar 同）
+UNET_ITER = 2000    # UNet 类轮次（tanh_full / unet_raar 同）= RAAR_ITER：控制变量要求组3 raar vs 组4 unet_raar 轮次一致（核心对照 P_M 实现，§8 单跑 unet_raar 1500 背景未收敛，提至 2000）
 N_GROUPS = 5        # 独立重复组数（5 组 × 4 实验 = 20 个，取统计）
 UNET_LR = 1e-4
 GAMMA = 0.8        # relaxed HIO 松弛系数（support 外 γ·ρ − β·ρ′，γ<1 防累加发散）。九测 γ=0.7 抑制周期斜线但仍震荡、七测 γ=0.9 出斜线，十测试 0.8 折中

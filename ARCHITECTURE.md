@@ -4,6 +4,8 @@
 
 > **九测（2026-07）后更新**：矩阵扩 5 法（HIO/RAAR/DM + tanh/sigmoid）。**RAAR 反射框架破 C14（C15）**——5/5 稳定 ssim 0.95、背景干净；DM β=1.1 排除；γ=0.7 抑制 HIO 斜线但治不了震荡；tanh/sigmoid 中心好但背景斑杂（C16）。
 
+> **十测（2026-07）后更新**：矩阵收 4 法（HIO / tanh_full / RAAR / unet_raar），核心对照 P_M 实现（raar 硬替换 vs unet_raar UNet 软约束），轮次对齐 2000。**unet_raar 命题失败（C18）**——UNet 软约束替代 P_M 引入不稳定性（5 组 ssim 0.619–0.938，组4 1700 轮相位发散突崩）、中心未超 RAAR；RAAR 对 P_M 精确性敏感，近似投影不能替代硬替换。**C16 归因到 loss 作用域（C17）**——全图 loss 背景干净但分摊中心梯度。γ=0.8 折中失败。详见 [十测汇报.md](十测汇报.md)。
+
 ---
 
 ## 1. 概述
@@ -16,11 +18,11 @@
 
 | 模块 | 职责 | 主要导出 |
 |---|---|---|
-| `utils.py`（工具层） | 共用基础设施：预处理、可微 FFT/IFFT、随机相位、shrinkwrap、直方图匹配、**配准**、评估 | `load_and_preprocess`、`fft_amp_phase`、`ifft_real`、`make_random_phase`、`init_density`、`shrinkwrap_support`、`estimate_reference_histogram`、`histogram_match`、**`register_to_gt`**、`evaluate_all`、`device` |
+| `utils.py`（工具层） | 共用基础设施：预处理、可微 FFT/IFFT、随机相位、shrinkwrap、直方图匹配、**实空间投影 `proj_S`**、**配准**、评估 | `load_and_preprocess`、`fft_amp_phase`、`ifft_real`、`make_random_phase`、`init_density`、`shrinkwrap_support`、`estimate_reference_histogram`、`histogram_match`、**`proj_S`**、**`register_to_gt`**、`evaluate_all`、`device` |
 | `hio.py`（方法层·HIO） | 严格 HIO：像空间硬替换振幅 + 实空间 relaxed HIO 反馈 + HM | `run_hio` |
 | `raar.py`（方法层·RAAR，九测） | RAAR 反射迭代：两空间反射 R=2P−I + β 松弛（破 C14，C15） | `run_raar` |
 | `dm.py`（方法层·DM，九测） | Difference Map 投影差迭代（β=1.1，已排除） | `run_dm` |
-| `unet_pr.py`（方法层·实验2/3） | 未训练 UNet：UNet（输出层 sigmoid/tanh 可选）+ 像空间振幅 MSE 反传（support 外置0/HIO反馈可选） | `UNet`、`run_unet` |
+| `unet_pr.py`（方法层·UNet） | 未训练 UNet：UNet（输出层 sigmoid/tanh 可选）+ 像空间振幅 MSE 反传（`loss_scope` support/full 验 C16）+ `run_unet_raar`（RAAR 骨架 + P_M 换 UNet 软约束，十测） | `UNet`、`run_unet`、`run_unet_raar` |
 | `main.py`（编排层） | 读图 → 10 组 × 5 实验（HIO×3 + UNet×2）→ 各出图 + 每组并排/对比 + summary + 断点续跑 | `main` |
 
 `smoke_test.py` / `_probe_unet.py` 是验证/探测脚本，非核心架构。
@@ -159,4 +161,6 @@ rho_work（暗背景，[1,1,H,W]）
 8. **指标虚高**（R5 强化）：iou/amp_cc 高的 tanh+HIO 也只“一点轮廓”；曲线丝滑才是真收敛信号。
 9. **RAAR 破 C14（C15，九测）**：反射框架 5/5 稳定 ssim 0.95 + 背景干净，项目首次拿到不靠概率的稳定高质量恢复；但中心物体质量不如 UNet。
 10. **DM β=1.1 排除（九测）**：5/5 ssim 0.10，support+positivity+HM setup 下不工作。
-11. **UNet 路线背景斑杂（C16，九测）**：tanh/sigmoid 中心物体好但背景杂项多；RAAR 干净背景反衬。十测方向：UNet + RAAR 结合。
+11. **UNet 路线背景斑杂（C16，九测）**：tanh/sigmoid 中心物体好但背景杂项多；RAAR 干净背景反衬。**十测归因到 loss 作用域（C17）：全图 loss 背景干净但分摊中心梯度。**
+12. **unet_raar 命题失败（C18，十测）**：UNet 软约束替代 P_M 引入不稳定性（5 组 ssim 0.619–0.938，组4 1700 轮相位发散突崩）、中心未超 RAAR；RAAR 对 P_M 精确性敏感，近似投影不能替代硬替换。
+13. **γ=0.8 折中失败（十测）**：HIO 5/5 ssim 0.215–0.292，与 γ=0.7 无改善，HIO 调参无救，已被 RAAR 全面碾压。
