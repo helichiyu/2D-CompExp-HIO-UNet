@@ -45,6 +45,8 @@ if hasattr(sys.stdout, "reconfigure"):
 from utils import (load_and_preprocess, fft_amp_phase, make_random_phase, init_density,
                    shrinkwrap_support, estimate_reference_histogram, unpad, register_to_gt)
 from hio import run_hio
+from raar import run_raar
+from dm import run_dm
 from unet_pr import run_unet
 
 # ===================== 中文显示 =====================
@@ -53,10 +55,10 @@ plt.rcParams['axes.unicode_minus'] = False
 
 # ===================== 超参（默认全量；可被命令行覆盖）=====================
 SIGMA0 = 3.0
-HIO_ITER = 5000     # 甲方轮次（每组重复 N_HIO_RUNS 次）
-UNET_ITER = 1500    # 乙方轮次（tanh+HIO / sigmoid 同）
-N_GROUPS = 10       # 独立重复组数（10 组 × 5 实验 = 50 个，取统计）
-N_HIO_RUNS = 3      # 每组 HIO 重复次数（收敛是概率性事件，多次撞收敛）
+HIO_ITER = 5000     # HIO / DM 轮次（HIO 验长迭代斜线 C14；DM 收敛慢需长跑）
+RAAR_ITER = 2000    # RAAR 轮次（单跑 1500 已收敛 ssim 0.95，2000 足够省时）
+UNET_ITER = 1500    # UNet 轮次（tanh+HIO / sigmoid 同）
+N_GROUPS = 5        # 独立重复组数（5 组 × 5 实验 = 25 个，取统计）
 UNET_LR = 1e-4
 GAMMA = 0.7        # relaxed HIO 松弛系数（support 外 γ·ρ − β·ρ′，γ<1 防累加发散）。八测阶段③扫 γ 发现 0.7 远优于七测 0.9（tanh+HIO psnr 16.46 vs 5.40、稳态震荡减半，C8 机理印证），故全局改 0.7
 
@@ -187,7 +189,7 @@ def plot_comparison(metrics_list, save_path):
     labels = [m[0] for m in metrics_list]
     keys = ['amp_cc', 'phase_err', 'support_iou', 'ssim']
     titles = ['振幅域 CC (amp_cc)', '平均相位误差 Δφ (rad)', '支撑域 IoU', 'SSIM']
-    colors = ['#2E86AB', '#F18F01', '#A23B72']  # 三实验色
+    colors = ['#2E86AB', '#F18F01', '#A23B72', '#5E8B3E', '#8C5060']  # 五法色
     fig, axes = plt.subplots(1, 4, figsize=(20, 5))
     for ax, k, t in zip(axes, keys, titles):
         vals = [m[1][k] for m in metrics_list]
@@ -217,37 +219,25 @@ def save_comparison_table(metrics_list, save_path):
     print(f"  已保存对比表: {os.path.basename(save_path)}")
 
 
-def plot_hio_3runs(hio_runs, g, gt_vis, bg_val, pad_info, rho_work, save_path):
-    """HIO 3 次实空间并排（原图 + 3 次），供看图挑收敛：收敛=轮廓，不收敛=斜线/中间态。"""
-    n = len(hio_runs)
-    fig, axes = plt.subplots(1, n + 1, figsize=(5 * (n + 1), 5))
-    axes[0].imshow(gt_vis, cmap='gray', vmin=0, vmax=1); axes[0].set_title('原图', fontsize=14); axes[0].axis('off')
-    for i, (best, hist) in enumerate(hio_runs):
-        best_a = register_to_gt(best, rho_work)
-        vis = unpad(bg_val - best_a, pad_info).squeeze().detach().cpu().numpy()
-        axes[i + 1].imshow(vis, cmap='gray', vmin=0, vmax=1)
-        axes[i + 1].set_title(f'组{g} 第{i + 1}次\nssim={hist["ssim"][-1]:.3f}', fontsize=13)
-        axes[i + 1].axis('off')
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight'); plt.close()
-    print(f"  已保存 hio_3runs.png（3 次并排，供挑收敛）")
 
 
 # ===================== 断点续跑 / 配置 / 汇总 =====================
-def load_progress(run_dir, hio_iter, unet_iter, n_groups):
+def load_progress(run_dir, hio_iter, raar_iter, unet_iter, n_groups):
     """读 progress.json；不存在则新建。续跑时校验配置一致。返回进度 dict。"""
     path = os.path.join(run_dir, 'progress.json')
     if os.path.exists(path):
         with open(path, encoding='utf-8') as f:
             prog = json.load(f)
-        if (prog['hio_iter'] != hio_iter or prog['unet_iter'] != unet_iter
-                or prog['n_groups'] != n_groups):
+        if (prog['hio_iter'] != hio_iter or prog['raar_iter'] != raar_iter
+                or prog['unet_iter'] != unet_iter or prog['n_groups'] != n_groups):
             raise RuntimeError(
-                f"续跑配置与 progress.json 不一致：记录 hio={prog['hio_iter']} unet={prog['unet_iter']} "
-                f"groups={prog['n_groups']}，当前 hio={hio_iter} unet={unet_iter} groups={n_groups}。"
+                f"续跑配置与 progress.json 不一致：记录 hio={prog['hio_iter']} raar={prog['raar_iter']} "
+                f"unet={prog['unet_iter']} groups={prog['n_groups']}，"
+                f"当前 hio={hio_iter} raar={raar_iter} unet={unet_iter} groups={n_groups}。"
                 f"请用一致参数续跑，或换新目录。")
         return prog
-    prog = {'done_groups': [], 'n_groups': n_groups, 'hio_iter': hio_iter, 'unet_iter': unet_iter}
+    prog = {'done_groups': [], 'n_groups': n_groups, 'hio_iter': hio_iter,
+            'raar_iter': raar_iter, 'unet_iter': unet_iter}
     save_progress(run_dir, prog)
     return prog
 
@@ -257,14 +247,16 @@ def save_progress(run_dir, prog):
         json.dump(prog, f, ensure_ascii=False, indent=2)
 
 
-def write_config(run_dir, hio_iter, unet_iter, n_groups):
+def write_config(run_dir, hio_iter, raar_iter, unet_iter, n_groups):
     lines = [
-        f"HIO_ITER = {hio_iter}（每组 ×{N_HIO_RUNS} 次）",
+        f"HIO_ITER = {hio_iter}（HIO / DM；HIO 验长迭代斜线 C14、DM 收敛慢需长跑）",
+        f"RAAR_ITER = {raar_iter}（RAAR；单跑 1500 已收敛，省时）",
         f"UNET_ITER = {unet_iter}（tanh+HIO / sigmoid 同）",
         f"N_GROUPS = {n_groups}",
         f"UNET_LR = {UNET_LR}",
-        f"GAMMA = {GAMMA}（relaxed HIO）",
-        f"实验总数 = {n_groups * (N_HIO_RUNS + 2)}（{n_groups} 组 × {N_HIO_RUNS + 2}）",
+        f"GAMMA = {GAMMA}（relaxed HIO，HIO/tanh+HIO 用）",
+        f"RAAR β=0.7 / DM β=1.1（论文值，见 九测计划.md §3.5）",
+        f"实验总数 = {n_groups * 5}（{n_groups} 组 × 5 法）",
     ]
     with open(os.path.join(run_dir, 'config.txt'), 'w', encoding='utf-8') as f:
         f.write('\n'.join(lines))
@@ -286,7 +278,7 @@ def read_metrics_csv(path):
 
 def write_summary(run_dir, n_groups):
     """扫所有组的 5 实验 metrics.csv，汇总 summary.csv（每个实验一行）。"""
-    types = [(f'hio_{j}', 'HIO') for j in range(1, N_HIO_RUNS + 1)] + [('tanh_hio', 'tanh+HIO'), ('sigmoid', 'sigmoid')]
+    types = [('hio', 'HIO'), ('raar', 'RAAR'), ('dm', 'DM'), ('tanh_hio', 'tanh+HIO'), ('sigmoid', 'sigmoid')]
     keys = ['psnr', 'ssim', 'pearson_cc', 'amp_cc', 'phase_err', 'support_iou']
     rows = [['group', 'type', 'exp'] + keys]
     for g in range(1, n_groups + 1):
@@ -304,9 +296,9 @@ def write_summary(run_dir, n_groups):
 
 
 # ===================== 单组实验 =====================
-def run_one_group(g, run_dir, group_dir, shared, hio_iter, unet_iter):
-    """跑一组 5 个实验：HIO×3（各独立 phase）+ tanh+HIO + sigmoid（共享该组 rho_init）。
-    各自 dump 全套，出该组 hio_3runs.png + comparison_gXx.png/csv。"""
+def run_one_group(g, run_dir, group_dir, shared, hio_iter, raar_iter, unet_iter):
+    """跑一组 5 个实验：HIO / RAAR / DM（纯迭代，各独立 phase）+ tanh+HIO + sigmoid（共享该组 rho_init）。
+    各自 dump 全套，出该组 comparison_gXx.png/csv（5 法末轮对比，仅初筛；以 real_space.png 看图为准）。"""
     amp_orig = shared['amp_orig']; rho_work = shared['rho_work']
     ref_edges = shared['ref_edges']; support_gt = shared['support_gt']
     gt_vis = shared['gt_vis']; bg_val = shared['bg_val']; pad_info = shared['pad_info']
@@ -315,18 +307,35 @@ def run_one_group(g, run_dir, group_dir, shared, hio_iter, unet_iter):
     phase_g = make_random_phase(rho_work.shape)
     rho_init_g = init_density(amp_orig, phase_g)
 
-    # HIO ×3（各独立 phase seed，撞收敛）
-    hio_runs = []
-    for j in range(N_HIO_RUNS):
-        print(f"\n--- 组{g} HIO 第 {j + 1}/{N_HIO_RUNS} 次（{hio_iter} 轮）---")
-        phase_j = make_random_phase(rho_work.shape)
-        rho_init_j = init_density(amp_orig, phase_j)
-        best_j, hist_j = run_hio(amp_orig, rho_init_j, ref_edges, rho_work, support_gt,
-                                 max_iter=hio_iter, beta=0.7, sigma0=SIGMA0, eval_every=100, gamma=GAMMA)
-        dump_experiment(os.path.join(f'group{g:02d}', f'hio_{j + 1}'), f'组{g} HIO 第{j + 1}次',
-                        best_j, hist_j, gt_vis, rho_work, bg_val, pad_info, support_gt, run_dir,
-                        monitor_key='amp_residual', monitor_label='振幅残差')
-        hio_runs.append((best_j, hist_j))
+    # HIO（纯迭代对照，relaxed γ=0.7）
+    print(f"\n--- 组{g} HIO（{hio_iter} 轮，γ={GAMMA}）---")
+    phase_h = make_random_phase(rho_work.shape)
+    rho_init_h = init_density(amp_orig, phase_h)
+    best_h, hist_h = run_hio(amp_orig, rho_init_h, ref_edges, rho_work, support_gt,
+                             max_iter=hio_iter, beta=0.7, sigma0=SIGMA0, eval_every=100, gamma=GAMMA)
+    dump_experiment(os.path.join(f'group{g:02d}', 'hio'), f'组{g} HIO',
+                    best_h, hist_h, gt_vis, rho_work, bg_val, pad_info, support_gt, run_dir,
+                    monitor_key='amp_residual', monitor_label='振幅残差')
+
+    # RAAR（反射算子，β=0.7）
+    print(f"\n--- 组{g} RAAR（{raar_iter} 轮，β=0.7）---")
+    phase_r = make_random_phase(rho_work.shape)
+    rho_init_r = init_density(amp_orig, phase_r)
+    best_r, hist_r = run_raar(amp_orig, rho_init_r, ref_edges, rho_work, support_gt,
+                              max_iter=raar_iter, beta=0.7, sigma0=SIGMA0, eval_every=100)
+    dump_experiment(os.path.join(f'group{g:02d}', 'raar'), f'组{g} RAAR',
+                    best_r, hist_r, gt_vis, rho_work, bg_val, pad_info, support_gt, run_dir,
+                    monitor_key='amp_residual', monitor_label='振幅残差')
+
+    # DM（投影差，β=1.1 非退化）
+    print(f"\n--- 组{g} DM（{hio_iter} 轮，β=1.1）---")
+    phase_d = make_random_phase(rho_work.shape)
+    rho_init_d = init_density(amp_orig, phase_d)
+    best_d, hist_d = run_dm(amp_orig, rho_init_d, ref_edges, rho_work, support_gt,
+                            max_iter=hio_iter, beta=1.1, sigma0=SIGMA0, eval_every=100)
+    dump_experiment(os.path.join(f'group{g:02d}', 'dm'), f'组{g} DM',
+                    best_d, hist_d, gt_vis, rho_work, bg_val, pad_info, support_gt, run_dir,
+                    monitor_key='amp_residual', monitor_label='振幅残差')
 
     # tanh+HIO（UNet tanh + HIO 反馈）
     print(f"\n--- 组{g} tanh+HIO（{unet_iter} 轮）---")
@@ -346,28 +355,26 @@ def run_one_group(g, run_dir, group_dir, shared, hio_iter, unet_iter):
                     best_s, hist_s, gt_vis, rho_work, bg_val, pad_info, support_gt, run_dir,
                     monitor_key='loss', monitor_label='UNet loss')
 
-    # HIO 3 次实空间并排（供看图挑收敛）
-    plot_hio_3runs(hio_runs, g, gt_vis, bg_val, pad_info, rho_work, os.path.join(group_dir, 'hio_3runs.png'))
-
-    # 该组 comparison（HIO 取末轮 ssim 最高者作代表，仅初筛；是否真收敛以 hio_3runs.png 看图为准）
-    _, hist_hio_rep = max(hio_runs, key=lambda r: r[1]['ssim'][-1])
-    metrics_list = [(f'HIO g{g}', best_point(hist_hio_rep)),
+    # 该组 comparison（5 法末轮指标对比，仅初筛；以 real_space.png 看图为准 R5/R8）
+    metrics_list = [(f'HIO g{g}', best_point(hist_h)),
+                    (f'RAAR g{g}', best_point(hist_r)),
+                    (f'DM g{g}', best_point(hist_d)),
                     (f'tanh+HIO g{g}', best_point(hist_t)),
                     (f'sigmoid g{g}', best_point(hist_s))]
     plot_comparison(metrics_list, os.path.join(group_dir, f'comparison_g{g:02d}.png'))
     save_comparison_table(metrics_list, os.path.join(group_dir, f'comparison_g{g:02d}.csv'))
 
 
-def main(run_dir=None, hio_iter=HIO_ITER, unet_iter=UNET_ITER, n_groups=N_GROUPS):
+def main(run_dir=None, hio_iter=HIO_ITER, unet_iter=UNET_ITER, n_groups=N_GROUPS, raar_iter=RAAR_ITER):
     run_dir = run_dir or make_run_dir()
     print(f"结果目录：{run_dir}/")
-    print(f"轮次：HIO={hio_iter}（每组 ×{N_HIO_RUNS}），UNet={unet_iter}，组数={n_groups}，"
-          f"共 {n_groups * (N_HIO_RUNS + 2)} 个实验\n")
+    print(f"轮次：HIO/DM={hio_iter}，RAAR={raar_iter}，UNet={unet_iter}，组数={n_groups}，"
+          f"共 {n_groups * 5} 个实验\n")
 
-    prog = load_progress(run_dir, hio_iter, unet_iter, n_groups)
+    prog = load_progress(run_dir, hio_iter, raar_iter, unet_iter, n_groups)
     if prog['done_groups']:
         print(f"续跑：已完成组 {sorted(prog['done_groups'])}，从第 {max(prog['done_groups']) + 1} 组继续\n")
-    write_config(run_dir, hio_iter, unet_iter, n_groups)
+    write_config(run_dir, hio_iter, raar_iter, unet_iter, n_groups)
 
     # 共享预处理（控制变量：各组同图、同 amp_orig、同 ref_edges、同 support_gt）
     print("=" * 60); print("加载 567.png ...")
@@ -389,7 +396,7 @@ def main(run_dir=None, hio_iter=HIO_ITER, unet_iter=UNET_ITER, n_groups=N_GROUPS
         print("\n" + "=" * 60); print(f"=== 组 {g}/{n_groups} ==="); print("=" * 60)
         group_dir = os.path.join(run_dir, f'group{g:02d}')
         os.makedirs(group_dir, exist_ok=True)
-        run_one_group(g, run_dir, group_dir, shared, hio_iter, unet_iter)
+        run_one_group(g, run_dir, group_dir, shared, hio_iter, raar_iter, unet_iter)
         prog['done_groups'].append(g)
         save_progress(run_dir, prog)
         print(f"\n=== 组 {g} 完成，进度 {len(prog['done_groups'])}/{n_groups} ===")
