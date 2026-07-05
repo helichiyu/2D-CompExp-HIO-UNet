@@ -58,7 +58,7 @@ UNET_ITER = 1500    # 乙方轮次（tanh+HIO / sigmoid 同）
 N_GROUPS = 10       # 独立重复组数（10 组 × 5 实验 = 50 个，取统计）
 N_HIO_RUNS = 3      # 每组 HIO 重复次数（收敛是概率性事件，多次撞收敛）
 UNET_LR = 1e-4
-GAMMA = 0.9        # relaxed HIO 松弛系数（support 外 γ·ρ − β·ρ′，γ<1 防累加发散；HIO/tanh+HIO 一致）
+GAMMA = 0.7        # relaxed HIO 松弛系数（support 外 γ·ρ − β·ρ′，γ<1 防累加发散）。八测阶段③扫 γ 发现 0.7 远优于七测 0.9（tanh+HIO psnr 16.46 vs 5.40、稳态震荡减半，C8 机理印证），故全局改 0.7
 
 
 def make_run_dir():

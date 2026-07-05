@@ -21,7 +21,8 @@ def run_hio(amp_orig, rho_init, ref_edges, gt, support_gt,
             max_iter=3000, beta=0.7,
             sigma0=3.0, sigma_end=1.0, sigma_interval=20, sigma_total=200,
             eval_every=20, do_hm=True, hm_start=0,
-            fixed_support=None, init_support=None, warmup=0, align_eval=True, gamma=0.9):
+            fixed_support=None, init_support=None, warmup=0, align_eval=True, gamma=0.9,
+            mode='hio', er_every=20, er_len=5):
     """
     严格 HIO 迭代。
       amp_orig:       原始振幅 [1,1,H,W]
@@ -34,6 +35,10 @@ def run_hio(amp_orig, rho_init, ref_edges, gt, support_gt,
       fixed_support:  非 None 时全程用此支撑域（调试用）
       init_support:   warmup 阶段的初始支撑域（None 则用 shrinkwrap(rho_init)）
       warmup:         前 warmup 轮固定 init_support，之后动态 shrinkwrap
+      mode:           'hio'（默认，纯 relaxed HIO）/ 'er_hio'（ER+HIO 交替，⚠️ 八测⑤废弃——周期穿插
+                      ER 侵蚀物体，见 八测阶段汇报.md §5；保留参数供参考，不再使用）
+      er_every:       mode='er_hio' 时的 HIO 段长度（轮）
+      er_len:         mode='er_hio' 时的 ER 段长度（轮）
     返回 (best_rho, history)。
     """
     _, phase_orig = fft_amp_phase(gt)
@@ -61,9 +66,16 @@ def run_hio(amp_orig, rho_init, ref_edges, gt, support_gt,
             sigma = sigma_schedule(it - warmup, sigma0, sigma_end, sigma_total)
             support = shrinkwrap_support(rho_k, sigma)
 
-        # === 实空间：relaxed HIO（support 外 γ·ρ_k − β·ρ′，γ<1 防累加发散）===
+        # === 实空间：按 mode 选 ER / relaxed HIO ===
         keep = (support > 0.5) & (rho_prime >= 0)
-        rho_next = torch.where(keep, rho_prime, gamma * rho_k - beta * rho_prime)
+        in_er = (mode == 'er_hio' and er_len > 0 and er_every > 0
+                 and (it % (er_every + er_len)) >= er_every)
+        if in_er:
+            # ER 段：违反约束的像素置 0（硬投影，稳定；穿插在 HIO 间收敛局部，Latychevskaia §3.4）
+            rho_next = torch.where(keep, rho_prime, torch.zeros_like(rho_prime))
+        else:
+            # relaxed HIO：support 外 γ·ρ_k − β·ρ′（γ<1 防累加发散）
+            rho_next = torch.where(keep, rho_prime, gamma * rho_k - beta * rho_prime)
 
         # === 实空间：直方图匹配（只在 support 内，hm_start 后开启）===
         if do_hm and it >= hm_start:
