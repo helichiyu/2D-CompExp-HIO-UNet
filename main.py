@@ -49,10 +49,10 @@ plt.rcParams['axes.unicode_minus'] = False
 
 # ===================== 超参（默认全量；可被命令行覆盖）=====================
 SIGMA0 = 3.0
-HIO_ITER = 5000     # HIO / DM 轮次（HIO 验长迭代斜线 C14；DM 收敛慢需长跑）
+HIO_ITER = 5000     # HIO 轮次（十测组1，relaxed gamma=0.8）
 RAAR_ITER = 2000    # RAAR 轮次（单跑 1500 已收敛 ssim 0.95，2000 足够省时）
-UNET_ITER = 1500    # UNet 轮次（tanh+HIO / sigmoid 同）
-N_GROUPS = 5        # 独立重复组数（5 组 × 5 实验 = 25 个，取统计）
+UNET_ITER = 1500    # UNet 类轮次（tanh_full / unet_raar 同）
+N_GROUPS = 5        # 独立重复组数（5 组 × 4 实验 = 20 个，取统计）
 UNET_LR = 1e-4
 GAMMA = 0.8        # relaxed HIO 松弛系数（support 外 γ·ρ − β·ρ′，γ<1 防累加发散）。九测 γ=0.7 抑制周期斜线但仍震荡、七测 γ=0.9 出斜线，十测试 0.8 折中
 
@@ -177,13 +177,13 @@ def dump_experiment(folder, label, best, hist, gt_vis, rho_work, bg_val, pad_inf
     print(f"  已保存 state.pt（best_rho + history）")
 
 
-# ===================== 三实验横向对比 =====================
+# ===================== 组内横向对比 =====================
 def plot_comparison(metrics_list, save_path):
-    """三实验主指标柱状对比。metrics_list: [(label, {metric:val}), ...]"""
+    """组内多方法主指标柱状对比。metrics_list: [(label, {metric:val}), ...]"""
     labels = [m[0] for m in metrics_list]
     keys = ['amp_cc', 'phase_err', 'support_iou', 'ssim']
     titles = ['振幅域 CC (amp_cc)', '平均相位误差 Δφ (rad)', '支撑域 IoU', 'SSIM']
-    colors = ['#2E86AB', '#F18F01', '#A23B72', '#5E8B3E', '#8C5060']  # 五法色
+    colors = ['#2E86AB', '#F18F01', '#A23B72', '#5E8B3E', '#8C5060']  # 多方法配色
     fig, axes = plt.subplots(1, 4, figsize=(20, 5))
     for ax, k, t in zip(axes, keys, titles):
         vals = [m[1][k] for m in metrics_list]
