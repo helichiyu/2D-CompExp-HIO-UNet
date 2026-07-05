@@ -95,6 +95,13 @@ def ifft_real(amp, phase):
     return torch.real(torch.fft.ifft2(F))
 
 
+# ===================== 投影算子（RAAR 反射用）=====================
+def proj_S(x, support):
+    """实空间投影 P_S：support 外 = 0、support 内 clamp_min(0)。幂等。
+    RAAR 反射 R_S = 2·P_S − I 用（raar.py / unet_pr.run_unet_raar 共享）。"""
+    return torch.where(support > 0.5, torch.clamp_min(x, 0), torch.zeros_like(x))
+
+
 # ===================== 随机相位初始化 =====================
 def make_random_phase(shape, seed=None):
     """

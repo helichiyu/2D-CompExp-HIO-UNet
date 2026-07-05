@@ -19,12 +19,7 @@ import time
 import torch
 
 from utils import (fft_amp_phase, ifft_real, shrinkwrap_support, sigma_schedule,
-                   histogram_match, evaluate_all)
-
-
-def _proj_S(x, support):
-    """实空间投影 P_S：support 外 0、内 clamp_min(0)。幂等。"""
-    return torch.where(support > 0.5, torch.clamp_min(x, 0), torch.zeros_like(x))
+                   histogram_match, evaluate_all, proj_S)
 
 
 def _proj_M(x, amp_orig):
@@ -65,7 +60,7 @@ def run_raar(amp_orig, rho_init, ref_edges, gt, support_gt,
             support = shrinkwrap_support(x, sigma)
 
         # === RAAR 迭代核 ===
-        r_s = 2 * _proj_S(x, support) - x                       # R_S(x) = 2·P_S(x) − x
+        r_s = 2 * proj_S(x, support) - x                        # R_S(x) = 2·P_S(x) − x
         r_m_rs = 2 * _proj_M(r_s, amp_orig) - r_s               # R_M(R_S(x)) = 2·P_M(R_S(x)) − R_S(x)
         x_next = (beta / 2) * (r_m_rs + x) + (1 - beta) * r_s   # (β/2)(R_M(R_S)+x) + (1−β)·R_S
 
