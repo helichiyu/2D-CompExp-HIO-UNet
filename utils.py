@@ -357,7 +357,7 @@ def evaluate_all(rho, gt, amp_orig, phase_orig, support_gt, hm_sigma=1.0, align_
     甲乙双方评估方式一致。
       rho:        当前恢复的实空间密度 [1,1,H,W]（暗背景）
       gt:         真值密度（暗背景原图）
-      amp_orig:   原始振幅（去直流）
+      amp_orig:   原始振幅（含直流；fft_amp_phase 默认 keep_dc=True，去直流会导致迭代不收敛）
       phase_orig: 原始相位
       support_gt: 真值支撑域
     """

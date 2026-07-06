@@ -66,12 +66,6 @@ def make_run_dir():
     return run_dir
 
 
-def to_visual(rho, bg_val, pad_info):
-    """暗背景 rho → 视觉白背景（bg_val − rho）→ unpad → numpy [H,W]。"""
-    vis = unpad(bg_val - rho, pad_info)
-    return vis.squeeze().detach().cpu().numpy()
-
-
 def best_point(hist):
     """取末轮（收敛态）的各项指标——不取最优瞬间，最优瞬间未必稳定真实。"""
     keys = ['psnr', 'ssim', 'pearson_cc', 'amp_cc', 'phase_err', 'support_iou']
@@ -79,12 +73,12 @@ def best_point(hist):
 
 
 # ===================== 单实验可视化 =====================
-def plot_real_space(gt_vis, res_vis, title, save_path):
-    """1×3：原图 / 该实验结果 / 绝对误差。"""
+def plot_real_space(gt_rho, res_rho, title, save_path):
+    """1×3：原图 / 该实验结果 / 绝对误差（暗背景 rho_work 域：物体亮、背景≈0，即极性翻转后的实际迭代域）。"""
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    axes[0].imshow(gt_vis, cmap='gray', vmin=0, vmax=1); axes[0].set_title('原图（真值）', fontsize=14)
-    axes[1].imshow(res_vis, cmap='gray', vmin=0, vmax=1); axes[1].set_title(title, fontsize=14)
-    err = np.abs(res_vis - gt_vis)
+    axes[0].imshow(gt_rho, cmap='gray', vmin=0, vmax=1); axes[0].set_title('原图（真值，暗背景）', fontsize=14)
+    axes[1].imshow(res_rho, cmap='gray', vmin=0, vmax=1); axes[1].set_title(title, fontsize=14)
+    err = np.abs(res_rho - gt_rho)
     im = axes[2].imshow(err, cmap='hot', vmin=0, vmax=max(err.max(), 1e-6))
     axes[2].set_title(f'|{title} - 原图|', fontsize=14)
     plt.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04)
@@ -157,16 +151,17 @@ def save_history_csv(hist, monitor_key, save_path):
     print(f"  已保存 history.csv")
 
 
-def dump_experiment(folder, label, best, hist, gt_vis, rho_work, bg_val, pad_info, support_gt, run_dir,
+def dump_experiment(folder, label, best, hist, rho_work, pad_info, support_gt, run_dir,
                     monitor_key=None, monitor_label=None):
     """单个实验出全套图 + 指标表（best 先配准再出图，消除平移歧义）。folder 相对 run_dir。"""
     exp_dir = os.path.join(run_dir, folder)
     os.makedirs(exp_dir, exist_ok=True)
     print(f"\n--- {label} 出图 ---")
     best_aligned = register_to_gt(best, rho_work)            # 出图前配准，消除平移歧义
-    res_vis = to_visual(best_aligned, bg_val, pad_info)
+    res_rho = unpad(best_aligned, pad_info).squeeze().detach().cpu().numpy()  # 暗背景（极性翻转后域，物体亮）
+    gt_rho = unpad(rho_work, pad_info).squeeze().detach().cpu().numpy()       # 暗背景真值
     support_res = shrinkwrap_support(best_aligned, 1.0)
-    plot_real_space(gt_vis, res_vis, label, os.path.join(exp_dir, 'real_space.png'))
+    plot_real_space(gt_rho, res_rho, label, os.path.join(exp_dir, 'real_space.png'))
     plot_spectra(rho_work, best_aligned, label, os.path.join(exp_dir, 'spectra.png'))
     plot_support(support_gt, support_res, label, pad_info, os.path.join(exp_dir, 'support.png'))
     plot_convergence_single(hist, label, os.path.join(exp_dir, 'convergence.png'),
@@ -300,7 +295,7 @@ def run_one_group(g, run_dir, group_dir, shared, hio_iter, raar_iter, unet_iter)
     各自 dump 全套，出该组 comparison_gXx.png/csv（4 法末轮对比，仅初筛；以 real_space.png 看图为准）。"""
     amp_orig = shared['amp_orig']; rho_work = shared['rho_work']
     ref_edges = shared['ref_edges']; support_gt = shared['support_gt']
-    gt_vis = shared['gt_vis']; bg_val = shared['bg_val']; pad_info = shared['pad_info']
+    pad_info = shared['pad_info']
 
     # 该组 UNet 起点 rho_init（组间独立 → 组间样本独立）
     phase_g = make_random_phase(rho_work.shape)
@@ -314,7 +309,7 @@ def run_one_group(g, run_dir, group_dir, shared, hio_iter, raar_iter, unet_iter)
                              max_iter=hio_iter, beta=0.7, sigma0=SIGMA0, eval_every=100, gamma=GAMMA,
                              use_adaptive_sigma=USE_ADAPTIVE_SIGMA)
     dump_experiment(os.path.join(f'group{g:02d}', 'hio'), f'组{g} HIO',
-                    best_h, hist_h, gt_vis, rho_work, bg_val, pad_info, support_gt, run_dir,
+                    best_h, hist_h, rho_work, pad_info, support_gt, run_dir,
                     monitor_key='amp_residual', monitor_label='振幅残差')
 
     # tanh_full（UNet tanh + HIO 反馈 + 全图 loss）
@@ -324,7 +319,7 @@ def run_one_group(g, run_dir, group_dir, shared, hio_iter, raar_iter, unet_iter)
                               out_act='tanh', use_hio_feedback=True, beta=0.7, gamma=GAMMA,
                               loss_scope='full', use_adaptive_sigma=USE_ADAPTIVE_SIGMA)
     dump_experiment(os.path.join(f'group{g:02d}', 'tanh_full'), f'组{g} tanh+全图loss',
-                    best_t, hist_t, gt_vis, rho_work, bg_val, pad_info, support_gt, run_dir,
+                    best_t, hist_t, rho_work, pad_info, support_gt, run_dir,
                     monitor_key='loss', monitor_label='UNet loss')
 
     # RAAR（反射算子，β=0.7）
@@ -335,7 +330,7 @@ def run_one_group(g, run_dir, group_dir, shared, hio_iter, raar_iter, unet_iter)
                               max_iter=raar_iter, beta=0.7, sigma0=SIGMA0, eval_every=100,
                               use_adaptive_sigma=USE_ADAPTIVE_SIGMA)
     dump_experiment(os.path.join(f'group{g:02d}', 'raar'), f'组{g} RAAR',
-                    best_r, hist_r, gt_vis, rho_work, bg_val, pad_info, support_gt, run_dir,
+                    best_r, hist_r, rho_work, pad_info, support_gt, run_dir,
                     monitor_key='amp_residual', monitor_label='振幅残差')
 
     # unet_raar（UNet + RAAR 融合，β=0.7）
@@ -344,7 +339,7 @@ def run_one_group(g, run_dir, group_dir, shared, hio_iter, raar_iter, unet_iter)
                                    max_iter=unet_iter, lr=UNET_LR, sigma0=SIGMA0, eval_every=100,
                                    beta=0.7, out_act='tanh', use_adaptive_sigma=USE_ADAPTIVE_SIGMA)
     dump_experiment(os.path.join(f'group{g:02d}', 'unet_raar'), f'组{g} UNet+RAAR',
-                    best_u, hist_u, gt_vis, rho_work, bg_val, pad_info, support_gt, run_dir,
+                    best_u, hist_u, rho_work, pad_info, support_gt, run_dir,
                     monitor_key='loss', monitor_label='UNet loss')
 
     # 该组 comparison（4 法末轮指标对比，仅初筛；以 real_space.png 看图为准 R5/R8）
@@ -375,9 +370,8 @@ def main(run_dir=None, hio_iter=HIO_ITER, unet_iter=UNET_ITER, n_groups=N_GROUPS
     amp_orig, _ = fft_amp_phase(rho_work)
     support_gt = shrinkwrap_support(rho_work, SIGMA0)
     ref_edges = estimate_reference_histogram(rho_work, support_gt, n_bins=300)
-    gt_vis = to_visual(rho_work, bg_val, pad_info)
     shared = {'amp_orig': amp_orig, 'rho_work': rho_work, 'ref_edges': ref_edges,
-              'support_gt': support_gt, 'gt_vis': gt_vis, 'bg_val': bg_val, 'pad_info': pad_info}
+              'support_gt': support_gt, 'pad_info': pad_info}
 
     # 组循环（断点续跑：跳过已完成组）
     for g in range(1, n_groups + 1):
