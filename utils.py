@@ -160,6 +160,38 @@ def sigma_schedule(it, sigma0, sigma_end, total):
     return sigma0 + (sigma_end - sigma0) * min(it / max(total, 1), 1.0)
 
 
+class AdaptiveSigma:
+    """Yoshida 2024 自适应 σ（论文 §3.6）：监控过采样比 OS ratio（total/support）变化幅度，
+    剧变（|Δ|>delta_thresh）用大 σ 平滑、稳定切小 σ 锁定。替代固定 sigma_schedule，
+    防 support 剧变→发散（十测组4 unet_raar 突崩即此类）。详见 调研报告.md §3.9、十一测计划.md §2.2。
+
+    sigma_large/small 用项目 sigma0/sigma_end（保与固定 schedule 同值域，唯一变量是 σ 决定逻辑）；
+    delta_thresh=2.0 是 Yoshida 论文原值。
+    """
+
+    def __init__(self, sigma_large=3.0, sigma_small=1.0, delta_thresh=2.0):
+        self.sigma_large = sigma_large
+        self.sigma_small = sigma_small
+        self.delta_thresh = delta_thresh
+        self.prev_os = None           # 上次 SW 的 OS ratio
+        self.locked = False           # 一旦切小 σ 就锁死
+        self.sigma = sigma_large      # 首次用大 σ
+
+    def next(self, support):
+        """根据当前 support mask [1,1,H,W] 返回本次 shrinkwrap 用的 σ。"""
+        os_ratio = support.numel() / max(support.sum().item(), 1.0)  # OS ratio = total/support，>2
+        if self.locked:
+            return self.sigma_small
+        if self.prev_os is not None:
+            if abs(os_ratio - self.prev_os) > self.delta_thresh:   # support 剧变→大 σ 平滑
+                self.sigma = self.sigma_large
+            else:                                                    # support 稳定→小 σ 紧贴，锁定
+                self.sigma = self.sigma_small
+                self.locked = True
+        self.prev_os = os_ratio
+        return self.sigma
+
+
 # ===================== 直方图匹配（Zhang-Main 分箱线性映射）=====================
 def _quantile_edges(vals, n_bins):
     """对 vals 计算等数量分箱的 n_bins+1 个边界（每个 bin 含相同数量像素）。"""

@@ -14,7 +14,7 @@ import time
 import torch
 
 from utils import (fft_amp_phase, ifft_real, shrinkwrap_support, sigma_schedule,
-                   histogram_match, evaluate_all)
+                   histogram_match, evaluate_all, AdaptiveSigma)
 
 
 def run_hio(amp_orig, rho_init, ref_edges, gt, support_gt,
@@ -22,7 +22,7 @@ def run_hio(amp_orig, rho_init, ref_edges, gt, support_gt,
             sigma0=3.0, sigma_end=1.0, sigma_interval=20, sigma_total=200,
             eval_every=20, do_hm=True, hm_start=0,
             fixed_support=None, init_support=None, warmup=0, align_eval=True, gamma=0.9,
-            mode='hio', er_every=20, er_len=5):
+            mode='hio', er_every=20, er_len=5, use_adaptive_sigma=False):
     """
     严格 HIO 迭代。
       amp_orig:       原始振幅 [1,1,H,W]
@@ -51,6 +51,8 @@ def run_hio(amp_orig, rho_init, ref_edges, gt, support_gt,
     else:
         support = shrinkwrap_support(rho_k, sigma0)
 
+    adaptive_sigma = AdaptiveSigma(sigma0, sigma_end) if use_adaptive_sigma else None
+
     metric_keys = ["psnr", "ssim", "pearson_cc", "amp_cc", "phase_err", "support_iou"]
     history = {"iter": [], "amp_residual": []}
     for k in metric_keys:
@@ -63,7 +65,10 @@ def run_hio(amp_orig, rho_init, ref_edges, gt, support_gt,
 
         # === 动态 support 更新（warmup 后周期更新，σ 线性衰减）===
         if fixed_support is None and it >= warmup and it % sigma_interval == 0:
-            sigma = sigma_schedule(it - warmup, sigma0, sigma_end, sigma_total)
+            if use_adaptive_sigma:
+                sigma = adaptive_sigma.next(support)
+            else:
+                sigma = sigma_schedule(it - warmup, sigma0, sigma_end, sigma_total)
             support = shrinkwrap_support(rho_k, sigma)
 
         # === 实空间：按 mode 选 ER / relaxed HIO ===

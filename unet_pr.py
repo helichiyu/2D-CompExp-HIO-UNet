@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from utils import (fft_amp_phase, shrinkwrap_support, sigma_schedule,
-                   histogram_match, evaluate_all, device, proj_S)
+                   histogram_match, evaluate_all, AdaptiveSigma, device, proj_S)
 
 
 # ===================== UNet 结构（自己重写，InstanceNorm 适配单图训练）=====================
@@ -111,7 +111,7 @@ def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
              out_act='tanh', use_hio_feedback=True,
              sigma0=3.0, sigma_end=1.0, sigma_interval=20, sigma_total=500,
              eval_every=20, unet_seed=None, align_eval=True, gamma=0.9,
-             loss_scope='support'):
+             loss_scope='support', use_adaptive_sigma=False):
     """
     未训练 UNet（DIP）迭代。
       amp_orig:         原始振幅（去直流）[1,1,H,W]
@@ -137,6 +137,8 @@ def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
 
     current_input = rho_init.detach().clone()  # 第一轮"先实空间"：从 ρ_0 起手
     support = shrinkwrap_support(rho_init, sigma0)
+
+    adaptive_sigma = AdaptiveSigma(sigma0, sigma_end) if use_adaptive_sigma else None
 
     metric_keys = ["psnr", "ssim", "pearson_cc", "amp_cc", "phase_err", "support_iou"]
     history = {"iter": [], "loss": []}
@@ -168,7 +170,10 @@ def run_unet(amp_orig, rho_init, ref_edges, gt, support_gt,
             rho_next = histogram_match(rho_next, support, ref_edges)
 
             if it > 0 and it % sigma_interval == 0:
-                sigma = sigma_schedule(it, sigma0, sigma_end, sigma_total)
+                if use_adaptive_sigma:
+                    sigma = adaptive_sigma.next(support)
+                else:
+                    sigma = sigma_schedule(it, sigma0, sigma_end, sigma_total)
                 support = shrinkwrap_support(rho_next, sigma)
 
             if it % eval_every == 0:
@@ -193,7 +198,8 @@ def run_unet_raar(amp_orig, rho_init, ref_edges, gt, support_gt,
                   max_iter=1500, lr=1e-4, beta=0.7,
                   out_act='tanh',
                   sigma0=3.0, sigma_end=1.0, sigma_interval=20, sigma_total=200,
-                  eval_every=20, unet_seed=None, align_eval=True, warmup=0):
+                  eval_every=20, unet_seed=None, align_eval=True, warmup=0,
+                  use_adaptive_sigma=False):
     """
     UNet + RAAR 融合：RAAR 反射骨架一字不改，P_M 从硬替换换成 UNet 软约束。
       像空间 P_M：UNet(r_s) 前向 → 全图振幅 MSE 反传训练（UNet 当软振幅投影器）。
@@ -213,6 +219,8 @@ def run_unet_raar(amp_orig, rho_init, ref_edges, gt, support_gt,
 
     x = rho_init.detach().clone()
     support = shrinkwrap_support(rho_init, sigma0)
+
+    adaptive_sigma = AdaptiveSigma(sigma0, sigma_end) if use_adaptive_sigma else None
 
     metric_keys = ["psnr", "ssim", "pearson_cc", "amp_cc", "phase_err", "support_iou"]
     history = {"iter": [], "loss": [], "amp_residual": []}
@@ -239,7 +247,10 @@ def run_unet_raar(amp_orig, rho_init, ref_edges, gt, support_gt,
             x_next = (beta / 2) * (r_m + x) + (1 - beta) * r_s  # β 松弛平均（β=0.7）
             x_next = histogram_match(x_next, support, ref_edges)
             if it >= warmup and it % sigma_interval == 0:      # 动态 support，沿用 RAAR 节奏
-                sigma = sigma_schedule(it - warmup, sigma0, sigma_end, sigma_total)
+                if use_adaptive_sigma:
+                    sigma = adaptive_sigma.next(support)
+                else:
+                    sigma = sigma_schedule(it - warmup, sigma0, sigma_end, sigma_total)
                 support = shrinkwrap_support(x_next, sigma)
             if it % eval_every == 0:
                 m = evaluate_all(x_next, gt, amp_orig, phase_orig, support_gt, align_to_gt=align_eval)

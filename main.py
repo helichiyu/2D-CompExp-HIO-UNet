@@ -1,28 +1,28 @@
 """
-main.py —— 十测：4 法 × N 组对比矩阵（HIO / tanh_full / RAAR / unet_raar）
+main.py —— 十一测：4 法 × N 组对比矩阵（HIO / tanh_full / RAAR / unet_raar）+ Yoshida 自适应 σ
 
-九测核心认知 C15：RAAR 反射框架 5/5 稳定收敛 ssim 0.95、背景干净；但中心物体不如 UNet（C16 背景斑杂）。
-十测主命题：unet_raar（RAAR 反射骨架 + P_M 换 UNet 软约束）能否兼得"RAAR 干净背景 + UNet 中心质量"；
-附带 tanh_full（全图 loss）验 C16 背景斑杂根源猜想、γ=0.8 折中。详见 十测计划.md。
+十测认知 C18：unet_raar 命题失败（UNet 软约束替代 P_M 引入不稳定性，组4 突崩）；C17：loss 作用域是背景斑杂主因。
+十一测主命题：把 shrinkwrap 的 σ 从固定 schedule 改成 Yoshida 2024 自适应 σ（support 剧变大 σ、
+稳定小 σ 锁定），看能否稳定 support 估计 → 防 unet_raar 突崩 + 锁模式 B + 缓解 HIO 斜线。详见 十一测计划.md。
 
-每组 4 个实验位（十测矩阵）：
+每组 4 个实验位（十一测矩阵，统一自适应 σ）：
   hio         纯迭代 HIO（relaxed γ=0.8），5000 轮，独立 phase seed
-  tanh_full   UNet tanh + HIO 反馈 + 全图 loss，2000 轮
-  raar        纯迭代 RAAR（β=0.7），2000 轮
-  unet_raar   UNet + RAAR 融合（β=0.7），2000 轮（=raar 同轮次，控制变量对齐核心对照 P_M 实现）
+  tanh_full   UNet tanh + HIO 反馈 + 全图 loss，3000 轮
+  raar        纯迭代 RAAR（β=0.7），3000 轮
+  unet_raar   UNet + RAAR 融合（β=0.7），3000 轮
 
 运行：
   D:\\anaconda3\\envs\\use\\python.exe main.py [HIO_ITER] [UNET_ITER] [RUN_DIR]
   不传 RUN_DIR → 新建 results/run_<时间戳>/；传 RUN_DIR → 续跑该目录（跳过已完成组）。
-  默认 HIO_ITER=5000、RAAR_ITER=2000、UNET_ITER=2000、N_GROUPS=5。
-  （tanh_full/unet_raar 同用 UNET_ITER=2000=RAAR_ITER，保组3 raar vs 组4 unet_raar 轮次一致。）
+  默认 HIO_ITER=5000、RAAR_ITER=3000、UNET_ITER=3000、N_GROUPS=10、USE_ADAPTIVE_SIGMA=True。
+  （4 法除 HIO 外统一 3000 轮；σ 用 AdaptiveSigma 自适应，对照 = 十测固定 schedule 历史数据。）
 
 结果输出到 results/run_<时间戳>/，含：
   config.txt / progress.json
   group01../  各组 hio + tanh_full + raar + unet_raar（各全套）+ comparison_gXx.png/csv
   summary.csv  4 法末轮指标汇总（组号/类型/实验/6 指标）
 
-注：指标仅初筛（R5），最终以 real_space.png 看图 + 收敛曲线丝滑度为准（R8/C13）。
+注：指标仅初筛（R5），最终以 real_space.png 看图 + 收敛曲线丝滑度为准（R8/C13）；iou 是背景干净度主指标（R12）。
 """
 
 import csv
@@ -50,10 +50,11 @@ plt.rcParams['axes.unicode_minus'] = False
 
 # ===================== 超参（默认全量；可被命令行覆盖）=====================
 SIGMA0 = 3.0
-HIO_ITER = 5000     # HIO 轮次（十测组1，relaxed gamma=0.8）
-RAAR_ITER = 2000    # RAAR 轮次（单跑 1500 已收敛 ssim 0.95，2000 足够省时）
-UNET_ITER = 2000    # UNet 类轮次（tanh_full / unet_raar 同）= RAAR_ITER：控制变量要求组3 raar vs 组4 unet_raar 轮次一致（核心对照 P_M 实现，§8 单跑 unet_raar 1500 背景未收敛，提至 2000）
-N_GROUPS = 5        # 独立重复组数（5 组 × 4 实验 = 20 个，取统计）
+HIO_ITER = 10000    # HIO 轮次（十一测，relaxed gamma=0.8）
+RAAR_ITER = 5000    # RAAR 轮次（十一测：HIO 10000 / 其他 5000）
+UNET_ITER = 5000    # UNet 类轮次（tanh_full / unet_raar 同）：十一测 HIO 10000 / 其他 5000
+N_GROUPS = 4        # 独立重复组数（4 组 × 4 实验 = 16 个）
+USE_ADAPTIVE_SIGMA = True  # 十一测：Yoshida 自适应 σ（support 剧变大 σ、稳定小 σ 锁定）
 UNET_LR = 1e-4
 GAMMA = 0.8        # relaxed HIO 松弛系数（support 外 γ·ρ − β·ρ′，γ<1 防累加发散）。九测 γ=0.7 抑制周期斜线但仍震荡、七测 γ=0.9 出斜线，十测试 0.8 折中
 
@@ -244,14 +245,15 @@ def save_progress(run_dir, prog):
 
 def write_config(run_dir, hio_iter, raar_iter, unet_iter, n_groups):
     lines = [
-        f"HIO_ITER = {hio_iter}（HIO；验 γ=0.8 折中）",
-        f"RAAR_ITER = {raar_iter}（RAAR / 纯迭代基线）",
+        f"HIO_ITER = {hio_iter}（HIO）",
+        f"RAAR_ITER = {raar_iter}（RAAR）",
         f"UNET_ITER = {unet_iter}（tanh_full / unet_raar 同）",
         f"N_GROUPS = {n_groups}",
+        f"USE_ADAPTIVE_SIGMA = {USE_ADAPTIVE_SIGMA}（Yoshida 自适应 σ，十一测主变量）",
         f"UNET_LR = {UNET_LR}",
         f"GAMMA = {GAMMA}（relaxed HIO，HIO/tanh_full 用）",
-        f"RAAR β=0.7 / unet_raar β=0.7（论文值，见 十测计划.md §3）",
-        f"tanh_full loss_scope=full（全图振幅，验 C16）",
+        f"RAAR β=0.7 / unet_raar β=0.7",
+        f"tanh_full loss_scope=full（全图振幅）",
         f"实验总数 = {n_groups * 4}（{n_groups} 组 × 4 法）",
     ]
     with open(os.path.join(run_dir, 'config.txt'), 'w', encoding='utf-8') as f:
@@ -309,7 +311,8 @@ def run_one_group(g, run_dir, group_dir, shared, hio_iter, raar_iter, unet_iter)
     phase_h = make_random_phase(rho_work.shape)
     rho_init_h = init_density(amp_orig, phase_h)
     best_h, hist_h = run_hio(amp_orig, rho_init_h, ref_edges, rho_work, support_gt,
-                             max_iter=hio_iter, beta=0.7, sigma0=SIGMA0, eval_every=100, gamma=GAMMA)
+                             max_iter=hio_iter, beta=0.7, sigma0=SIGMA0, eval_every=100, gamma=GAMMA,
+                             use_adaptive_sigma=USE_ADAPTIVE_SIGMA)
     dump_experiment(os.path.join(f'group{g:02d}', 'hio'), f'组{g} HIO',
                     best_h, hist_h, gt_vis, rho_work, bg_val, pad_info, support_gt, run_dir,
                     monitor_key='amp_residual', monitor_label='振幅残差')
@@ -319,7 +322,7 @@ def run_one_group(g, run_dir, group_dir, shared, hio_iter, raar_iter, unet_iter)
     best_t, hist_t = run_unet(amp_orig, rho_init_g, ref_edges, rho_work, support_gt,
                               max_iter=unet_iter, lr=UNET_LR, sigma0=SIGMA0, eval_every=100,
                               out_act='tanh', use_hio_feedback=True, beta=0.7, gamma=GAMMA,
-                              loss_scope='full')
+                              loss_scope='full', use_adaptive_sigma=USE_ADAPTIVE_SIGMA)
     dump_experiment(os.path.join(f'group{g:02d}', 'tanh_full'), f'组{g} tanh+全图loss',
                     best_t, hist_t, gt_vis, rho_work, bg_val, pad_info, support_gt, run_dir,
                     monitor_key='loss', monitor_label='UNet loss')
@@ -329,7 +332,8 @@ def run_one_group(g, run_dir, group_dir, shared, hio_iter, raar_iter, unet_iter)
     phase_r = make_random_phase(rho_work.shape)
     rho_init_r = init_density(amp_orig, phase_r)
     best_r, hist_r = run_raar(amp_orig, rho_init_r, ref_edges, rho_work, support_gt,
-                              max_iter=raar_iter, beta=0.7, sigma0=SIGMA0, eval_every=100)
+                              max_iter=raar_iter, beta=0.7, sigma0=SIGMA0, eval_every=100,
+                              use_adaptive_sigma=USE_ADAPTIVE_SIGMA)
     dump_experiment(os.path.join(f'group{g:02d}', 'raar'), f'组{g} RAAR',
                     best_r, hist_r, gt_vis, rho_work, bg_val, pad_info, support_gt, run_dir,
                     monitor_key='amp_residual', monitor_label='振幅残差')
@@ -338,7 +342,7 @@ def run_one_group(g, run_dir, group_dir, shared, hio_iter, raar_iter, unet_iter)
     print(f"\n--- 组{g} UNet+RAAR（{unet_iter} 轮，β=0.7）---")
     best_u, hist_u = run_unet_raar(amp_orig, rho_init_g, ref_edges, rho_work, support_gt,
                                    max_iter=unet_iter, lr=UNET_LR, sigma0=SIGMA0, eval_every=100,
-                                   beta=0.7, out_act='tanh')
+                                   beta=0.7, out_act='tanh', use_adaptive_sigma=USE_ADAPTIVE_SIGMA)
     dump_experiment(os.path.join(f'group{g:02d}', 'unet_raar'), f'组{g} UNet+RAAR',
                     best_u, hist_u, gt_vis, rho_work, bg_val, pad_info, support_gt, run_dir,
                     monitor_key='loss', monitor_label='UNet loss')

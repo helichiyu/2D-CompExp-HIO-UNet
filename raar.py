@@ -19,7 +19,7 @@ import time
 import torch
 
 from utils import (fft_amp_phase, ifft_real, shrinkwrap_support, sigma_schedule,
-                   histogram_match, evaluate_all, proj_S)
+                   histogram_match, evaluate_all, AdaptiveSigma, proj_S)
 
 
 def _proj_M(x, amp_orig):
@@ -32,7 +32,8 @@ def run_raar(amp_orig, rho_init, ref_edges, gt, support_gt,
              max_iter=3000, beta=0.7,
              sigma0=3.0, sigma_end=1.0, sigma_interval=20, sigma_total=200,
              eval_every=20, do_hm=True, hm_start=0,
-             fixed_support=None, init_support=None, warmup=0, align_eval=True):
+             fixed_support=None, init_support=None, warmup=0, align_eval=True,
+             use_adaptive_sigma=False):
     """
     RAAR 迭代。签名对齐 run_hio（去掉 gamma/mode/er_* —— RAAR 反射无累加项、
     无需松弛、不做 ER 交替）。support/HM/评估流水线沿用 HIO，只换迭代核。
@@ -48,6 +49,8 @@ def run_raar(amp_orig, rho_init, ref_edges, gt, support_gt,
     else:
         support = shrinkwrap_support(x, sigma0)
 
+    adaptive_sigma = AdaptiveSigma(sigma0, sigma_end) if use_adaptive_sigma else None
+
     metric_keys = ["psnr", "ssim", "pearson_cc", "amp_cc", "phase_err", "support_iou"]
     history = {"iter": [], "amp_residual": []}
     for k in metric_keys:
@@ -56,7 +59,10 @@ def run_raar(amp_orig, rho_init, ref_edges, gt, support_gt,
     for it in range(max_iter):
         # === 动态 support（warmup 后周期更新，σ 线性衰减）===
         if fixed_support is None and it >= warmup and it % sigma_interval == 0:
-            sigma = sigma_schedule(it - warmup, sigma0, sigma_end, sigma_total)
+            if use_adaptive_sigma:
+                sigma = adaptive_sigma.next(support)
+            else:
+                sigma = sigma_schedule(it - warmup, sigma0, sigma_end, sigma_total)
             support = shrinkwrap_support(x, sigma)
 
         # === RAAR 迭代核 ===
